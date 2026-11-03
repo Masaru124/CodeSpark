@@ -137,18 +137,37 @@ with headroom.
 7. **Personalised responses are `no-store`**; nothing sensitive is cached at the edge.
 8. **Client work is deferred**: camera decoding and queueing happen on the phone, not the server.
 
-**Measured on a single local `next start` process against the Neon database** (Windows laptop,
-~50 ms database RTT, demo dataset of 60 teams / 210 participants):
+### Measured (production build, one local process, Neon over ~50 ms RTT)
 
-| Check | Result |
-|---|---|
-| 500 simultaneous in-flight requests, 1000 `/api/health` (real query) | 1000/1000 HTTP 200, 0 failures |
-| 500 simultaneous in-flight requests, 1000 `/api/scan` (HMAC verify + lookup + upsert), 8 volunteer sessions | 1000/1000 HTTP 200, 0 failures |
-| Throughput | ~77 req/s per process (latency-bound by the ~50 ms Neon round trip) |
+Single user, real browser (`node scripts/perf-browser.mjs`):
 
-That is one process on a laptop with high-latency database hops. The production target runs many
-isolates, so horizontal scaling, not this number, is what carries 500 concurrent users. Re-run
-`npm run loadtest` against the deployed environment before event day and size Neon compute from it.
+| Page | TTFB | load | JS |
+|---|---|---|---|
+| `/` | 39 ms | 138 ms | 106 kB |
+| `/login` | 7 ms | 87 ms | — |
+| `/results` | 236 ms | 302 ms | — |
+| participant pass | 479 ms | 574 ms | — |
+| `/admin` | 253 ms | 345 ms | — |
+| `/admin/repos` | 256 ms | 379 ms | — |
+
+Concurrent load (`autocannon`, 8 s per run, `/results` is the heaviest public page):
+
+| In flight | Throughput | p50 | p99 | Non-2xx |
+|---|---|---|---|---|
+| 50 | ~229 req/s | 171 ms | 1.07 s | 0 |
+| 100 | ~251 req/s | 341 ms | 2.5 s | 0 |
+| 500 | ~95–160 req/s | ~6 s | ~7.8 s | 0 |
+
+Reading: one Node process serves ~190–250 req/s and stays sub-second up to about 100 simultaneous
+connections. At 500 truly simultaneous connections latency degrades into seconds, but every request
+still returns 200 — it slows down, it does not fall over. A real 500-person event is far below that:
+if every attendee loads a page every 20 seconds it is ~25 req/s.
+
+To hold sub-second latency at 500 simultaneous connections, run two or more app instances (the app is
+stateless — sessions, rate limits and data all live in Postgres) and give Neon at least 1 CU of
+compute; the database round trip, not the framework, is the floor. The announcement burst is already
+absorbed by short caches: event config and the published leaderboard for 5 s, session lookups for 5 s,
+and the scanner roster for 30 s.
 
 Functional coverage: `node scripts/smoke.mjs` (29 checks: auth guards, signed passes, duplicate
 check-in and meal rejection, forged-token rejection, judge ownership, CSV export), plus a manual

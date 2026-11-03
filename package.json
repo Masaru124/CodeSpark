@@ -16,7 +16,9 @@
     "db:demo": "node scripts/db.mjs demo",
     "loadtest": "node scripts/loadtest.mjs",
     "e2e": "playwright test",
-    "e2e:ui": "playwright test --ui"
+    "e2e:ui": "playwright test --ui",
+    "perf": "node scripts/perf.mjs",
+    "perf:browser": "node scripts/perf-browser.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2",
