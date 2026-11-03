@@ -1,0 +1,209 @@
+# Code Spark Ops
+
+Operations console for **CODE SPARK 2026** (12 Nov 2026, AMC Engineering College): registration
+import, HMAC-signed QR passes, duplicate-proof check-in and meal scanning, deadline-enforced
+submissions, rubric judging with offline queues, and a publish gate on results.
+
+Implements `prd.md` / `spec.md`, with one deliberate change: **Neon Postgres** replaces Supabase.
+There is no Supabase RLS here — every query runs through the server with explicit role checks
+(details below).
+
+## Stack
+
+| Concern | Choice |
+|---|---|
+| App | Next.js 15 App Router, React 19, TypeScript, Tailwind |
+| Database | Neon Postgres via `@neondatabase/serverless` HTTP driver |
+| Auth | Password (PBKDF2-SHA256) for admins, invite codes for judges/volunteers, hashed session tokens in a cookie |
+| QR | `qrcode.react` render, HMAC-SHA256 token verified server-side |
+| Scan | `html5-qrcode` camera + manual entry + cached roster |
+| Offline | IndexedDB queue (`src/lib/offline.ts`) for scans and score sheets |
+| CSV | `papaparse` for import and export |
+| Repo tracker | GitHub REST API: visibility, first commit, last 100 commits, lifetime count |
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env.local     # then fill DATABASE_URL and QR_SECRET
+npm run db:migrate             # create tables, rubric, meals, event config
+npm run db:seed                # create the admin login from ADMIN_EMAIL / ADMIN_PASSWORD
+npm run db:demo                # optional: 60 fake teams + 14 judges + scores
+npm run dev                    # http://localhost:3000
+```
+
+Generate secrets:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+Use Neon's **pooled** connection string (`...-pooler...`) for `DATABASE_URL`.
+
+### Logins
+
+* Admin: `ADMIN_EMAIL` / `ADMIN_PASSWORD` at `/login` → `/admin`
+* Judge: 6-character code, created at `/admin/staff`
+* Volunteer: 6-character code, created at `/admin/staff`
+* Participant: no login — the signed pass link `/pass/<token>` is their credential
+
+### Demo data
+
+`npm run db:demo` wipes operational data (teams, scans, scores, sessions) and loads 60 teams,
+240 participants, 14 judges with invite codes and partial screening scores. It prints the counts
+and the codes live at `/admin/staff`.
+
+## Roles and what each surface does
+
+| Surface | Auth | Contents |
+|---|---|---|
+| `/` | public | Landing page, event timeline |
+| `/login` | public | Admin password, judge/volunteer code |
+| `/admin` | admin | Counters, meal coverage, judging coverage, recent audit |
+| `/admin/import` | admin | CSV upload/paste, dedupe by email+phone, upsert teams |
+| `/admin/teams`, `/admin/teams/[id]` | admin | Payment verification, printable QR passes, pass links |
+| `/admin/staff` | admin | Create/disable judges and volunteers, show their codes |
+| `/admin/judging` | admin | Auto-assign, coverage per team, outlier flags, conflicts |
+| `/admin/results` | admin | Live ranking, finalist round, publish gate, repo flags, CSV exports |
+| `/admin/repos` | admin | Submitted repositories, commit history, stars, manual and batch sync |
+| `/admin/audit` | admin | Audit trail |
+| `/volunteer` | volunteer/admin | Camera scanner for check-in + 3 meals, offline queue |
+| `/judge`, `/judge/[assignmentId]` | judge (own assignments only) | Team list, rubric scoring, queued sync |
+| `/pass/[token]` | token holder | QR pass, schedule, rules, submission form, own scores |
+| `/results` | public | Leaderboard, only after publish |
+| `/api/health` | public | DB liveness |
+
+## Rules the code enforces
+
+* **Check-in once.** `participants.checked_in_at` is only written when null; repeats return amber.
+* **One meal serving per person.** `unique (participant_id, meal_key)` in the database, not app
+  logic, so two volunteers scanning simultaneously still cannot double-serve.
+* **No forged passes.** Token = participant UUID + truncated HMAC-SHA256; signature verified before
+  any database read. The scanner shows name/team so a screenshot of someone else's pass is visible.
+* **Submission cutoff.** Enforced server-side against `event_config.event.submission_deadline`
+  (17:30 IST by default), independent of device clocks.
+* **Repo rules.** Public repo and first-commit time are read from GitHub and *flagged* for a human,
+  never auto-disqualified.
+* **Judging integrity.** A judge can only read/write assignments they own (`judge_id = session`),
+  conflicts are excluded at assignment time, and a score sheet only counts when all four criteria are
+  present.
+* **Publish gate.** `/results` and per-team score sheets read `event_config.publish`; nothing is
+  visible before an admin publishes.
+* **Audit trail.** Imports, payment verification, judge/volunteer creation, assignments, score syncs,
+  submissions and publishes are written to `audit_log`.
+
+## Repo tracker
+
+`/admin/repos` tracks every submitted GitHub repository and keeps its commit history in Postgres.
+
+* **Tables.** `repo_stats` holds the last known GitHub state per team (visibility, branch, stars,
+  forks, open issues, lifetime commit count, authors, first/last commit, last check, error).
+  `repo_commits` holds the most recent 100 commits per repository, keyed by `(team_id, sha)` so a
+  re-sync can never duplicate a commit.
+* **Sync.** `syncTeamRepo` makes at most three GitHub calls — repository metadata, newest 100 commits
+  (lifetime count read from the `Link` header), and the earliest commit only while it is unknown —
+  then writes the snapshot. Failures land in `repo_stats.error`; nothing throws into the page.
+* **Batches.** `syncRepoBatch` sweeps the repositories checked longest ago, four at a time, and stops
+  when GitHub's remaining quota reaches 3. Unauthenticated GitHub allows 60 requests/hour (about 20
+  repository syncs), so set `GITHUB_TOKEN` for a full 60-team sweep.
+* **Automation.** `POST /api/admin/repo-sync` accepts `{"limit": 60}` or `{"teamId": "…"}` and is
+  authorised by an admin session or an `x-repo-sync-token` header matching `REPO_SYNC_TOKEN`. Every
+  sync is written to the audit log.
+* **Flags, not verdicts.** The tracker feeds `submissions.repo_public` and
+  `submissions.first_commit_at`, so the publish gate still flags private repositories and
+  pre-kickoff commits for a human decision.
+
+## Design for concurrency (500 simultaneous users)
+
+The event itself peaks around 200 scans in 30 minutes; 500 concurrent sessions is the sizing target
+with headroom.
+
+1. **Stateless database access.** The Neon HTTP driver sends each query as one HTTPS request through
+   Neon's pooler. No connection is held between requests, so a burst of phones cannot exhaust a
+   connection pool, and Workers scale horizontally per request.
+2. **Hot paths are single-round-trip.** Overview counters are one aggregate query; the scanner
+   resolves and writes in at most three. Bulk import and bulk assignment are chunked multi-row
+   statements (200–300 rows), not per-row loops.
+3. **Short-TTL in-isolate caches** for event config (5 s) and the scanner roster (30 s) keep hundreds
+   of devices from re-reading constants on every tap. Publishing clears the config cache immediately.
+4. **Indexes on every lookup path**: `lower(email)`, last-10-digit phone, `assignments(judge_id,round)`,
+   `assignments(team_id,round)`, `meal_scans(meal_key,scanned_at)`, `sessions(expires_at)`.
+5. **Write idempotency.** Scans carry a `client_uuid`; meal inserts use `on conflict do nothing`;
+   score upserts are keyed by `(assignment_id, rubric_key)`; queue retries therefore cannot duplicate.
+6. **Rate limits** in Postgres per staff member for `scan`, `score sync`, and per IP for `login`
+   (fixed window, one statement).
+   Tunable without a rebuild: `SCAN_RATE_LIMIT_PER_MIN` (300), `SCORE_RATE_LIMIT_PER_MIN` (240),
+   `LOGIN_RATE_LIMIT_PER_MIN` (12).
+7. **Personalised responses are `no-store`**; nothing sensitive is cached at the edge.
+8. **Client work is deferred**: camera decoding and queueing happen on the phone, not the server.
+
+**Measured on a single local `next start` process against the Neon database** (Windows laptop,
+~50 ms database RTT, demo dataset of 60 teams / 210 participants):
+
+| Check | Result |
+|---|---|
+| 500 simultaneous in-flight requests, 1000 `/api/health` (real query) | 1000/1000 HTTP 200, 0 failures |
+| 500 simultaneous in-flight requests, 1000 `/api/scan` (HMAC verify + lookup + upsert), 8 volunteer sessions | 1000/1000 HTTP 200, 0 failures |
+| Throughput | ~77 req/s per process (latency-bound by the ~50 ms Neon round trip) |
+
+That is one process on a laptop with high-latency database hops. The production target runs many
+isolates, so horizontal scaling, not this number, is what carries 500 concurrent users. Re-run
+`npm run loadtest` against the deployed environment before event day and size Neon compute from it.
+
+Functional coverage: `node scripts/smoke.mjs` (29 checks: auth guards, signed passes, duplicate
+check-in and meal rejection, forged-token rejection, judge ownership, CSV export), plus a manual
+publish/unpublish pass through the real UI.
+
+## Testing
+
+Three suites, all against a real server and the real Neon database:
+
+```bash
+npm run e2e                # Playwright: 26 end-to-end checks across every surface
+node scripts/smoke.mjs     # 29 HTTP checks: guards, scans, scoring, exports
+npm run loadtest           # 500 concurrent scans against /api/scan
+```
+
+The Playwright suite drives Chromium through the public pages, every admin navigation link, payment
+verification, staff add/disable/enable, CSV import, auto-assignment, the repo tracker, a CSV download,
+publish/unpublish, logout, the volunteer scanner (mode switching, manual scan, duplicate refusal,
+name search, camera fallback), judge login and score-sheet persistence, and the participant pass
+(QR, submission, invalid URL). It writes a team named `E2E Robotics` and staff named `E2E Judge …` /
+`E2E Desk …`, so run it against demo data or delete those rows afterwards. `npx playwright show-report`
+opens the HTML report after a failure.
+
+## Security notes
+
+* `DATABASE_URL`, `QR_SECRET` and `GITHUB_TOKEN` are server-only; nothing is exposed via
+  `NEXT_PUBLIC_*`.
+* Session cookie: `httpOnly`, `SameSite=Lax`, `Secure` in production, 14-hour expiry, random 32-byte
+  token stored only as a SHA-256 hash.
+* Admin passwords are PBKDF2-SHA256 (120k iterations) with a per-user salt; login timing is constant
+  whether or not the account exists.
+* Pass tokens are unguessable (HMAC), but a pass does not grant access to other teams' data.
+* All SQL is parameterised; no string-built SQL from user input (bulk statements only build
+  placeholder lists).
+* No payment details are stored — only a verified flag and a reference.
+
+## Deployment (Freebuff Sites / Cloudflare Workers)
+
+The app is a standard Next.js App Router project with no Node-only dependencies, so it deploys via
+the OpenNext Workers adapter.
+
+```bash
+npx @opennextjs/cloudflare build       # produces .open-next/worker.js
+```
+
+Secrets to set in the hosting environment: `DATABASE_URL`, `QR_SECRET`, `GITHUB_TOKEN` (optional but
+recommended for the repo tracker), `REPO_SYNC_TOKEN` (optional, for scheduled syncs), `RESEND_*`
+(optional). Then run `npm run db:migrate` against the production database.
+
+## Operational runbook
+
+* **Before doors:** `/admin` counters correct, `/api/health` green, 2 devices per desk logged in,
+  printed passes and printed team lists in hand.
+* **Every 30 minutes:** check dashboard counters; export `teams` and `scans` CSV at 10:00 and 15:00.
+* **Wi-Fi down:** volunteers keep scanning offline (queue syncs on reconnect), judges keep scoring
+  offline; printed lists remain authoritative for the desk.
+* **Duplicate scan complaint:** the scanner shows the original serve time; the database has the record.
+* **After the event:** export every CSV, then delete personal data per college policy.

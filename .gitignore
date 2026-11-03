@@ -1,0 +1,20 @@
+node_modules/
+.next/
+out/
+build/
+.env
+.env.local
+.env.*.local
+secrets/
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+.vercel/
+.wrangler/
+.open-next/
+
+# Playwright
+test-results/
+playwright-report/
+
+.freebuff/

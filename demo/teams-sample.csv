@@ -1,0 +1,13 @@
+team_name,participant_name,email,phone,college,track,team_size,payment_verified,payment_ref,is_leader
+CampusRide,Aarav Sharma,aarav.sharma@example.com,9876543210,AMC Engineering College,AI/ML,3,TRUE,UPI-88213455,TRUE
+CampusRide,Diya Nair,diya.nair@example.com,9876543211,AMC Engineering College,AI/ML,3,TRUE,UPI-88213455,FALSE
+CampusRide,Kabir Reddy,kabir.reddy@example.com,9876543212,AMC Engineering College,AI/ML,3,TRUE,UPI-88213455,FALSE
+MediScan,Meera Iyer,meera.iyer@example.com,9876543213,PES University,HealthTech,4,TRUE,UPI-44120933,TRUE
+MediScan,Rohan Patel,rohan.patel@example.com,9876543214,PES University,HealthTech,4,TRUE,UPI-44120933,FALSE
+MediScan,Sana Gupta,sana.gupta@example.com,9876543215,PES University,HealthTech,4,TRUE,UPI-44120933,FALSE
+AgriSense,Vihaan Menon,vihaan.menon@example.com,9876543216,RV College of Engineering,Sustainability,3,FALSE,,TRUE
+AgriSense,Ananya Rao,ananya.rao@example.com,9876543217,RV College of Engineering,Sustainability,3,FALSE,,FALSE
+AgriSense,Dev Kulkarni,dev.kulkarni@example.com,9876543218,RV College of Engineering,Sustainability,3,FALSE,,FALSE
+StudyBuddy,Tara Shetty,tara.shetty@example.com,9876543219,BMS College of Engineering,EdTech,4,TRUE,UPI-55901221,TRUE
+StudyBuddy,Arjun Verma,arjun.verma@example.com,9876543220,BMS College of Engineering,EdTech,4,TRUE,UPI-55901221,FALSE
+StudyBuddy,Neha Joshi,neha.joshi@example.com,9876543221,BMS College of Engineering,EdTech,4,TRUE,UPI-55901221,FALSE
