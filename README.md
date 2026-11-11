@@ -1,8 +1,9 @@
 # Code Spark Ops
 
 Operations console for **CODE SPARK 2026** (12 Nov 2026, AMC Engineering College): registration
-import, HMAC-signed QR passes, duplicate-proof check-in and meal scanning, deadline-enforced
-submissions, rubric judging with offline queues, and a publish gate on results.
+import (XLSX or CSV), **one HMAC-signed QR pass per team**, lead-only check-in, deadline-enforced submissions, two-phase rubric judging (screening + finalist) with
+manual or automatic assignment and offline queues, statistics/report, full data export, and a
+publish gate on results.
 
 Implements `prd.md` / `spec.md`, with one deliberate change: **Neon Postgres** replaces Supabase.
 There is no Supabase RLS here — every query runs through the server with explicit role checks
@@ -28,7 +29,8 @@ npm install
 cp .env.example .env.local     # then fill DATABASE_URL and QR_SECRET
 npm run db:migrate             # create tables, rubric, meals, event config
 npm run db:seed                # create the admin login from ADMIN_EMAIL / ADMIN_PASSWORD
-npm run db:demo                # optional: 60 fake teams + 14 judges + scores
+node scripts/db.mjs teams      # load the real registration sheet (data/codespark-teams.csv)
+npm run db:demo                # optional: 60 fake teams + 14 judges + scores (do not mix with real data)
 npm run dev                    # http://localhost:3000
 ```
 
@@ -59,15 +61,17 @@ and the codes live at `/admin/staff`.
 |---|---|---|
 | `/` | public | Landing page, event timeline |
 | `/login` | public | Admin password, judge/volunteer code |
-| `/admin` | admin | Counters, meal coverage, judging coverage, recent audit |
-| `/admin/import` | admin | CSV upload/paste, dedupe by email+phone, upsert teams |
-| `/admin/teams`, `/admin/teams/[id]` | admin | Payment verification, printable QR passes, pass links |
+| `/admin` | admin | Counters, team check-in, judging coverage, recent audit |
+| `/admin/import` | admin | XLSX/CSV upload or paste, team-wide or one-row-per-person layout, idempotent upsert |
+| `/admin/teams`, `/admin/teams/[id]` | admin | Payment verification, the team's single printable QR pass, member list |
 | `/admin/staff` | admin | Create/disable judges and volunteers, show their codes |
-| `/admin/judging` | admin | Auto-assign, coverage per team, outlier flags, conflicts |
+| `/admin/judging` | admin | Auto or manual per-judge assignment (both phases), coverage, outlier flags, conflicts |
 | `/admin/results` | admin | Live ranking, finalist round, publish gate, repo flags, CSV exports |
+| `/admin/report` | admin | Statistics, phase-by-phase coverage, top 10, track averages, printable report |
+| `/admin/export` | admin | Every stored table as CSV, plus a one-file JSON dump |
 | `/admin/repos` | admin | Submitted repositories, commit history, stars, manual and batch sync |
 | `/admin/audit` | admin | Audit trail |
-| `/volunteer` | volunteer/admin | Camera scanner for check-in + 3 meals, offline queue |
+| `/volunteer` | volunteer/admin | Camera scanner for team-lead check-in, offline queue |
 | `/judge`, `/judge/[assignmentId]` | judge (own assignments only) | Team list, rubric scoring, queued sync |
 | `/pass/[token]` | token holder | QR pass, schedule, rules, submission form, own scores |
 | `/results` | public | Leaderboard, only after publish |
@@ -75,11 +79,13 @@ and the codes live at `/admin/staff`.
 
 ## Rules the code enforces
 
-* **Check-in once.** `participants.checked_in_at` is only written when null; repeats return amber.
-* **One meal serving per person.** `unique (participant_id, meal_key)` in the database, not app
-  logic, so two volunteers scanning simultaneously still cannot double-serve.
-* **No forged passes.** Token = participant UUID + truncated HMAC-SHA256; signature verified before
-  any database read. The scanner shows name/team so a screenshot of someone else's pass is visible.
+* **One pass per team.** The QR carries `/pass/<token>` for the team; scanning checks in the
+  **team lead only**. Meals are not scanned at this event, so the scanner has a single mode and the
+  meal tables are left untouched (existing rows still export).
+* **Check-in once.** Only the lead's `participants.checked_in_at` is written, only when null;
+  repeat scans return amber instead of creating a second record.
+* **No forged passes.** Token = team UUID + truncated HMAC-SHA256; signature verified before any
+  database read. The scanner shows the team and lead name so a shared screenshot is visible.
 * **Submission cutoff.** Enforced server-side against `event_config.event.submission_deadline`
   (17:30 IST by default), independent of device clocks.
 * **Repo rules.** Public repo and first-commit time are read from GitHub and *flagged* for a human,
@@ -128,8 +134,9 @@ with headroom.
    of devices from re-reading constants on every tap. Publishing clears the config cache immediately.
 4. **Indexes on every lookup path**: `lower(email)`, last-10-digit phone, `assignments(judge_id,round)`,
    `assignments(team_id,round)`, `meal_scans(meal_key,scanned_at)`, `sessions(expires_at)`.
-5. **Write idempotency.** Scans carry a `client_uuid`; meal inserts use `on conflict do nothing`;
-   score upserts are keyed by `(assignment_id, rubric_key)`; queue retries therefore cannot duplicate.
+5. **Write idempotency.** Scans carry a `client_uuid`; check-in only writes when
+   `checked_in_at is null`; score upserts are keyed by `(assignment_id, rubric_key)`; queue retries
+   therefore cannot duplicate.
 6. **Rate limits** in Postgres per staff member for `scan`, `score sync`, and per IP for `login`
    (fixed window, one statement).
    Tunable without a rebuild: `SCAN_RATE_LIMIT_PER_MIN` (300), `SCORE_RATE_LIMIT_PER_MIN` (240),
@@ -170,7 +177,7 @@ absorbed by short caches: event config and the published leaderboard for 5 s, se
 and the scanner roster for 30 s.
 
 Functional coverage: `node scripts/smoke.mjs` (29 checks: auth guards, signed passes, duplicate
-check-in and meal rejection, forged-token rejection, judge ownership, CSV export), plus a manual
+check-in rejection, forged-token rejection, judge ownership, CSV export), plus a manual
 publish/unpublish pass through the real UI.
 
 ## Testing
@@ -185,8 +192,8 @@ npm run loadtest           # 500 concurrent scans against /api/scan
 
 The Playwright suite drives Chromium through the public pages, every admin navigation link, payment
 verification, staff add/disable/enable, CSV import, auto-assignment, the repo tracker, a CSV download,
-publish/unpublish, logout, the volunteer scanner (mode switching, manual scan, duplicate refusal,
-name search, camera fallback), judge login and score-sheet persistence, and the participant pass
+publish/unpublish, logout, the volunteer scanner (manual scan, duplicate refusal, name search,
+camera fallback), judge login and score-sheet persistence, and the participant pass
 (QR, submission, invalid URL). It writes a team named `E2E Robotics` and staff named `E2E Judge …` /
 `E2E Desk …`, so run it against demo data or delete those rows afterwards. `npx playwright show-report`
 opens the HTML report after a failure.
@@ -224,5 +231,6 @@ recommended for the repo tracker), `REPO_SYNC_TOKEN` (optional, for scheduled sy
 * **Every 30 minutes:** check dashboard counters; export `teams` and `scans` CSV at 10:00 and 15:00.
 * **Wi-Fi down:** volunteers keep scanning offline (queue syncs on reconnect), judges keep scoring
   offline; printed lists remain authoritative for the desk.
-* **Duplicate scan complaint:** the scanner shows the original serve time; the database has the record.
+* **Duplicate scan complaint:** the pass page shows the original check-in time; the dashboard has
+  the team count.
 * **After the event:** export every CSV, then delete personal data per college policy.

@@ -22,6 +22,8 @@ const SESSION_HOURS = 14;
 const SESSION_CACHE_TTL_MS = 5_000;
 const SESSION_CACHE_MAX = 2_000;
 const sessionCache = new Map<string, { session: Session; at: number }>();
+// One database read per token even when several tabs refresh at once.
+const sessionInflight = new Map<string, Promise<Session | null>>();
 
 export async function createSession(role: Role, subjectId: string | null, label: string) {
   const token = randomToken(32);
@@ -50,6 +52,7 @@ export async function destroySession() {
   if (token) {
     const tokenHash = await sha256Hex(token);
     sessionCache.delete(tokenHash);
+    sessionInflight.delete(tokenHash);
     await q(`delete from sessions where token_hash = $1`, [tokenHash]);
   }
   store.delete(SESSION_COOKIE);
@@ -65,19 +68,31 @@ export const getSession = cache(async (): Promise<Session | null> => {
   const cached = sessionCache.get(tokenHash);
   if (cached && Date.now() - cached.at < SESSION_CACHE_TTL_MS) return cached.session;
 
-  const row = await one<Session & { expires_at: string }>(
-    `select id, role, subject_id as "subjectId", label, expires_at
-       from sessions where token_hash = $1 and expires_at > now()`,
-    [tokenHash],
-  );
-  if (!row) {
-    sessionCache.delete(tokenHash);
-    return null;
+  const pending = sessionInflight.get(tokenHash);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const row = await one<Session & { expires_at: string }>(
+      `select id, role, subject_id as "subjectId", label, expires_at
+         from sessions where token_hash = $1 and expires_at > now()`,
+      [tokenHash],
+    );
+    if (!row) {
+      sessionCache.delete(tokenHash);
+      return null;
+    }
+    const session: Session = { id: row.id, role: row.role, subjectId: row.subjectId, label: row.label };
+    if (sessionCache.size >= SESSION_CACHE_MAX) sessionCache.clear();
+    sessionCache.set(tokenHash, { session, at: Date.now() });
+    return session;
+  })();
+
+  sessionInflight.set(tokenHash, promise);
+  try {
+    return await promise;
+  } finally {
+    sessionInflight.delete(tokenHash);
   }
-  const session: Session = { id: row.id, role: row.role, subjectId: row.subjectId, label: row.label };
-  if (sessionCache.size >= SESSION_CACHE_MAX) sessionCache.clear();
-  sessionCache.set(tokenHash, { session, at: Date.now() });
-  return session;
 });
 
 /** For server components: bounce to /login when the role does not match. */

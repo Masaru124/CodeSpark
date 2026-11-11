@@ -1,36 +1,42 @@
 const TZ = "Asia/Kolkata";
 
+// Constructing Intl formatters is expensive and pages call these per row, so
+// build each one once per isolate.
+const TIME_FORMAT = new Intl.DateTimeFormat("en-IN", {
+  timeZone: TZ,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+const DATETIME_FORMAT = new Intl.DateTimeFormat("en-IN", {
+  timeZone: TZ,
+  day: "2-digit",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+const DATE_FORMAT = new Intl.DateTimeFormat("en-IN", {
+  timeZone: TZ,
+  weekday: "short",
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+});
+
 export function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString("en-IN", {
-    timeZone: TZ,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
+  return TIME_FORMAT.format(new Date(iso));
 }
 
 export function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("en-IN", {
-    timeZone: TZ,
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
+  return DATETIME_FORMAT.format(new Date(iso));
 }
 
 export function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleDateString("en-IN", {
-    timeZone: TZ,
-    weekday: "short",
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
+  return DATE_FORMAT.format(new Date(iso));
 }
 
 export function fmtScore(value: number | null | undefined): string {

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { q } from "@/lib/db";
 import { getConfig } from "@/lib/config";
 import { fmtDateTime, fmtScore } from "@/lib/format";
+import { createTtlCache } from "@/lib/cache";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Results" };
@@ -19,20 +20,18 @@ type ResultRow = {
 // Everyone refreshes this page the moment results are announced. A short
 // per-isolate cache turns that spike into memory hits instead of one query
 // per phone; publishing still lands within a few seconds everywhere.
-const RESULTS_CACHE_TTL_MS = 5_000;
-let resultsCache: { at: number; rows: ResultRow[] } | null = null;
+const resultsCache = createTtlCache<ResultRow[]>(5_000, 2);
 
 async function publishedResults(): Promise<ResultRow[]> {
-  if (resultsCache && Date.now() - resultsCache.at < RESULTS_CACHE_TTL_MS) return resultsCache.rows;
-  const rows = await q<ResultRow>(
-    `select r.team_id, t.name, t.college, t.track, r.rank,
-            r.screening_total::float, r.final_total::float
-       from results r join teams t on t.id = r.team_id
-      where r.published = true
-      order by r.rank asc`,
+  return resultsCache.get("published", async () =>
+    q<ResultRow>(
+      `select r.team_id, t.name, t.college, t.track, r.rank,
+              r.screening_total::float, r.final_total::float
+         from results r join teams t on t.id = r.team_id
+        where r.published = true
+        order by r.rank asc`,
+    ),
   );
-  resultsCache = { at: Date.now(), rows };
-  return rows;
 }
 
 export default async function PublicResultsPage() {

@@ -7,7 +7,7 @@ export const metadata: Metadata = {
     template: "%s · Code Spark Ops",
   },
   description:
-    "Check-in, meal tracking, submissions and judging operations for CODE SPARK 2026, AMC Engineering College.",
+    "Team check-in, submissions and judging operations for CODE SPARK 2026, AMC Engineering College.",
   robots: { index: false, follow: false },
 };
 

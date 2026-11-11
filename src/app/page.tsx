@@ -43,13 +43,13 @@ export default async function HomePage() {
             <h1 className="mt-4 text-4xl font-black leading-tight tracking-tight text-ink-900 sm:text-5xl">
               Fast check-in.
               <br />
-              Meals counted once.
+              One QR per team.
               <br />
               <span className="text-spark-600">Judging you can audit.</span>
             </h1>
             <p className="mt-5 max-w-xl text-base leading-relaxed text-ink-600">
-              One console for the people running the day: signed QR passes, duplicate-proof meal
-              scans, deadline-enforced submissions and per-judge score sheets that keep working
+              One console for the people running the day: signed team QR passes, lead-only
+              check-in, deadline-enforced submissions and per-judge score sheets that keep working
               when the Wi-Fi doesn&apos;t.
             </p>
             <div className="mt-7 flex flex-wrap gap-3">
@@ -63,7 +63,7 @@ export default async function HomePage() {
             <dl className="mt-9 grid max-w-lg grid-cols-3 gap-3">
               {[
                 ["2–4", "participants / team"],
-                ["3", "meals tracked"],
+                ["1", "QR per team"],
                 ["4", "rubric criteria"],
               ].map(([value, label]) => (
                 <div key={label} className="stat">
@@ -80,7 +80,7 @@ export default async function HomePage() {
               {[
                 ["08:30", "Check-in desks open", "Signed QR scanned; duplicate scans flagged"],
                 ["09:40", "Hacking starts", "First-commit timestamps begin"],
-                ["13:00", "Lunch scan", "One serving per participant per meal"],
+                ["13:00", "Lunch break", "Meals are served, not scanned"],
                 ["17:30", "Submission cutoff", "Server-enforced, no exceptions"],
                 ["17:30", "Screening round", "Two judges per team, live progress"],
                 ["18:15", "Finalists announced", "Top teams by weighted rubric"],
@@ -107,7 +107,7 @@ export default async function HomePage() {
         <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             ["Admin", "Import teams, verify payments, assign judges, publish results."],
-            ["Volunteer", "Phone scanner for check-in and each meal, works offline."],
+            ["Volunteer", "Phone scanner for team check-in, works offline."],
             ["Judge", "Assigned teams, rubric scores, queued sync when offline."],
             ["Participant", "QR pass, rules, submission links, own scores."],
           ].map(([role, description]) => (

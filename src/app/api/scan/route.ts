@@ -1,7 +1,7 @@
 import { fail, json, rateLimit, readJson, recordAudit } from "@/lib/api";
 import { apiRole } from "@/lib/session";
 import { q } from "@/lib/db";
-import { verifyQrToken } from "@/lib/crypto";
+import { verifyTeamToken } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -10,22 +10,28 @@ type Item = { token?: unknown; clientUuid?: unknown };
 type ScanResult = {
   token: string;
   clientUuid: string | null;
-  status: "ok" | "duplicate" | "invalid" | "error";
+  status: "ok" | "duplicate" | "invalid";
   name?: string;
   team?: string;
-  at?: string;
   message: string;
 };
 
-const MEALS = new Set(["lunch", "snacks", "dinner"]);
+type TeamScanRow = {
+  id: string;
+  name: string;
+  college: string | null;
+  total: number;
+  lead_name: string | null;
+  changed: number;
+};
 
+// One QR per team, and only the team lead is checked in. Meals are not scanned
+// at this event, so the endpoint accepts check-in batches only. The whole batch
+// is one SQL statement: no per-team round trips.
 export async function POST(request: Request) {
   const session = await apiRole("volunteer", "admin");
   if (!session) return fail("Sign in to scan", 401);
 
-  // Per-staff burst guard. Raise with SCAN_RATE_LIMIT_PER_MIN on event day if
-  // one desk legitimately scans faster; the database constraints still own
-  // duplicate prevention.
   const limit = await rateLimit(
     `scan:${session.subjectId}`,
     Number(process.env.SCAN_RATE_LIMIT_PER_MIN) || 300,
@@ -34,165 +40,126 @@ export async function POST(request: Request) {
 
   const body = await readJson(request);
   const mode = String(body.mode ?? "checkin");
-  if (mode !== "checkin" && !MEALS.has(mode)) return fail("Unknown scan mode");
+  if (mode !== "checkin") return fail("Only check-in scans are used at this event");
 
   const items = Array.isArray(body.items) ? (body.items as Item[]) : [];
   if (items.length === 0) return fail("Nothing to scan");
   if (items.length > 40) return fail("Too many scans in one batch", 413);
 
-  // 1. Verify every signature before touching the database.
+  // Verify every team signature before touching the database.
   const resolved = await Promise.all(
     items.map(async (item) => {
       const token = String(item.token ?? "").trim();
-      const participantId = token ? await verifyQrToken(token) : null;
+      const teamId = token ? await verifyTeamToken(token) : null;
       return {
         token,
         clientUuid: typeof item.clientUuid === "string" ? item.clientUuid.slice(0, 80) : null,
-        participantId,
+        teamId,
       };
     }),
   );
 
-  const ids = [...new Set(resolved.map((row) => row.participantId).filter(Boolean))] as string[];
-  const people = new Map<
-    string,
-    { name: string; team: string; team_id: string; verified: boolean; checked_in_at: string | null }
-  >();
+  const ids = [...new Set(resolved.map((row) => row.teamId).filter(Boolean))] as string[];
+  const teams = new Map<string, TeamScanRow>();
 
   if (ids.length > 0) {
-    const rows = await q<{
-      id: string;
-      name: string;
-      team: string;
-      team_id: string;
-      verified: boolean;
-      checked_in_at: string | null;
-    }>(
-      `select p.id, p.name, t.name as team, t.id as team_id, t.payment_verified as verified, p.checked_in_at
-         from participants p join teams t on t.id = p.team_id
-        where p.id = any($1::uuid[])`,
+    const rows = await q<TeamScanRow>(
+      `with target as (
+         select t.id, t.name, t.college,
+                (select count(*) from participants p where p.team_id = t.id)::int as total,
+                (select p.name from participants p
+                  where p.team_id = t.id
+                  order by p.is_leader desc, p.created_at, p.name limit 1) as lead_name,
+                (select p.id from participants p
+                  where p.team_id = t.id
+                  order by p.is_leader desc, p.created_at, p.name limit 1) as lead_id
+           from teams t
+          where t.id = any($1::uuid[])
+       ),
+       changed as (
+         update participants p set checked_in_at = now()
+           from target
+          where p.id = target.lead_id and p.checked_in_at is null
+          returning p.team_id
+       )
+       select target.id, target.name, target.college, target.total, target.lead_name,
+              (select count(*) from changed c where c.team_id = target.id)::int as changed
+         from target`,
       [ids],
     );
-    for (const row of rows) people.set(row.id, row);
+    for (const row of rows) {
+      teams.set(row.id, {
+        ...row,
+        total: Number(row.total),
+        changed: Number(row.changed),
+      });
+    }
   }
 
   const results = new Map<string, ScanResult>();
 
-  if (mode === "checkin") {
-    const fresh = [...people.entries()]
-      .filter(([, person]) => person.checked_in_at === null)
-      .map(([id]) => id);
+  for (const row of resolved) {
+    const key = row.token + (row.clientUuid ?? "");
+    const team = row.teamId ? teams.get(row.teamId) : undefined;
 
-    const updated = new Map<string, string>();
-    if (fresh.length > 0) {
-      const rows = await q<{ id: string; checked_in_at: string }>(
-        `update participants set checked_in_at = now()
-          where id = any($1::uuid[]) and checked_in_at is null
-          returning id, checked_in_at`,
-        [fresh],
-      );
-      for (const row of rows) updated.set(row.id, row.checked_in_at);
-    }
-
-    for (const row of resolved) {
-      const person = row.participantId ? people.get(row.participantId) : undefined;
-      if (!row.participantId || !person) {
-        results.set(row.token + (row.clientUuid ?? ""), {
-          token: row.token,
-          clientUuid: row.clientUuid,
-          status: "invalid",
-          message: "Invalid pass — not from this event",
-        });
-        continue;
-      }
-      const at = updated.get(row.participantId) ?? person.checked_in_at ?? undefined;
-      results.set(row.token + (row.clientUuid ?? ""), {
-        token: row.token,
-        clientUuid: row.clientUuid,
-        status: updated.has(row.participantId) ? "ok" : "duplicate",
-        name: person.name,
-        team: person.team,
-        at: at ?? undefined,
-        message: updated.has(row.participantId)
-          ? person.verified
-            ? "Checked in"
-            : "Checked in — payment still unverified"
-          : "Already checked in",
-      });
-    }
-  } else {
-    const existing = new Map<string, string>();
-    if (ids.length > 0) {
-      const rows = await q<{ participant_id: string; scanned_at: string }>(
-        `select participant_id, scanned_at from meal_scans
-          where meal_key = $1 and participant_id = any($2::uuid[])`,
-        [mode, ids],
-      );
-      for (const row of rows) existing.set(row.participant_id, row.scanned_at);
-    }
-
-    const toInsert = [...people.entries()].filter(([id]) => !existing.has(id));
-    const inserted = new Map<string, string>();
-
-    if (toInsert.length > 0) {
-      const values: unknown[] = [];
-      const placeholders = toInsert.map(([id, person], index) => {
-        const base = index * 5;
-        values.push(id, person.team_id, mode, session.label, null);
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
-      });
-      const rows = await q<{ participant_id: string; scanned_at: string }>(
-        `insert into meal_scans (participant_id, team_id, meal_key, scanned_by, client_uuid)
-         values ${placeholders.join(", ")}
-         on conflict do nothing
-         returning participant_id, scanned_at`,
-        values,
-      );
-      for (const row of rows) inserted.set(row.participant_id, row.scanned_at);
-    }
-
-    for (const row of resolved) {
-      const person = row.participantId ? people.get(row.participantId) : undefined;
-      const key = row.token + (row.clientUuid ?? "");
-      if (!row.participantId || !person) {
-        results.set(key, {
-          token: row.token,
-          clientUuid: row.clientUuid,
-          status: "invalid",
-          message: "Invalid pass — not from this event",
-        });
-        continue;
-      }
-      const isNew = inserted.has(row.participantId);
+    if (!row.teamId || !team) {
       results.set(key, {
         token: row.token,
         clientUuid: row.clientUuid,
-        status: isNew ? "ok" : "duplicate",
-        name: person.name,
-        team: person.team,
-        at: inserted.get(row.participantId) ?? existing.get(row.participantId),
-        message: isNew
-          ? `${mode} served`
-          : `Already served ${mode} at ${new Date(
-              existing.get(row.participantId) ?? Date.now(),
-            ).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}`,
+        status: "invalid",
+        message: "Invalid team pass — not from this event",
+      });
+      continue;
+    }
+
+    if (team.total === 0) {
+      results.set(key, {
+        token: row.token,
+        clientUuid: row.clientUuid,
+        status: "invalid",
+        name: team.name,
+        team: team.college ?? undefined,
+        message: "This team has no registered members yet",
+      });
+      continue;
+    }
+
+    if (team.changed > 0) {
+      results.set(key, {
+        token: row.token,
+        clientUuid: row.clientUuid,
+        status: "ok",
+        name: team.name,
+        team: team.college ?? undefined,
+        message: team.lead_name
+          ? `Team lead ${team.lead_name} checked in`
+          : "Team lead checked in",
+      });
+    } else {
+      results.set(key, {
+        token: row.token,
+        clientUuid: row.clientUuid,
+        status: "duplicate",
+        name: team.name,
+        team: team.college ?? undefined,
+        message: team.lead_name
+          ? `${team.lead_name} (team lead) already checked in`
+          : "Team lead already checked in",
       });
     }
   }
 
-  const payloadItems = resolved.map(
-    (row) => results.get(row.token + (row.clientUuid ?? ""))!,
-  );
+  const payloadItems = resolved.map((row) => results.get(row.token + (row.clientUuid ?? ""))!);
   const okCount = payloadItems.filter((row) => row.status === "ok").length;
   if (payloadItems.length > 1) {
     await recordAudit({
       actor: session.label,
       role: session.role,
-      action: `scan.${mode}.batch`,
-      entity: "meal_scans",
+      action: "scan.checkin.batch",
+      entity: "participants",
       payload: { count: payloadItems.length, ok: okCount },
     });
   }
 
-  return json({ ok: true, mode, items: payloadItems });
+  return json({ ok: true, mode: "checkin", items: payloadItems });
 }

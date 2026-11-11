@@ -10,10 +10,6 @@ export default async function VolunteerPage() {
   const config = await getConfig();
 
   return (
-    <Scanner
-      volunteer={session.label}
-      eventName={config.event.name}
-      deadline={config.event.submission_deadline}
-    />
+    <Scanner volunteer={session.label} eventName={config.event.name} />
   );
 }

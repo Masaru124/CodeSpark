@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Flash from "@/components/Flash";
-import { q, one } from "@/lib/db";
+import { one } from "@/lib/db";
 import { getConfig } from "@/lib/config";
 import { judgingProgress } from "@/lib/judging";
 import { fmtDateTime, pct } from "@/lib/format";
@@ -13,12 +13,14 @@ type Counts = {
   teams_verified: number;
   participants: number;
   participants_verified: number;
-  checked_in: number;
+  teams_checked_in: number;
   submissions: number;
   judges: number;
   volunteers: number;
   flags: number;
 };
+
+type AuditRow = { action: string; actor: string; at: string; entity: string | null };
 
 export default async function AdminOverview({
   searchParams,
@@ -27,45 +29,44 @@ export default async function AdminOverview({
 }) {
   const { ok, error } = await searchParams;
 
-  const [counts, meals, audit, progress, config] = await Promise.all([
-    one<Counts>(
+  const [summary, progress, config] = await Promise.all([
+    one<Counts & { audit: AuditRow[] }>(
+      // Counters and recent activity in one statement: under load each extra
+      // Neon query is another HTTPS round trip.
       `select
          (select count(*) from teams)::int as teams,
          (select count(*) from teams where payment_verified)::int as teams_verified,
          (select count(*) from participants)::int as participants,
          (select count(*) from participants p join teams t on t.id = p.team_id
            where t.payment_verified)::int as participants_verified,
-         (select count(*) from participants where checked_in_at is not null)::int as checked_in,
+         (select count(distinct p.team_id) from participants p
+           where p.checked_in_at is not null)::int as teams_checked_in,
          (select count(*) from submissions)::int as submissions,
          (select count(*) from judges where active)::int as judges,
          (select count(*) from volunteers where active)::int as volunteers,
          (select count(*) from submissions where repo_public = false
-            or first_commit_at is not null and first_commit_at < $1::timestamptz)::int as flags`,
+            or first_commit_at is not null and first_commit_at < $1::timestamptz)::int as flags,
+         (select coalesce(json_agg(row_to_json(a)), '[]'::json) from (
+            select action, actor, at, entity from audit_log order by at desc limit 8) a) as audit`,
       ["2026-11-12T09:40:00+05:30"],
-    ),
-    q<{ key: string; label: string; scans: number }>(
-      `select m.key, m.label, count(ms.id)::int as scans
-         from meals m left join meal_scans ms on ms.meal_key = m.key
-        group by m.key, m.label, m.sort order by m.sort`,
-    ),
-    q<{ action: string; actor: string; at: string; entity: string | null }>(
-      `select action, actor, at, entity from audit_log order by at desc limit 8`,
     ),
     judgingProgress(),
     getConfig(),
   ]);
 
-  const rows = counts ?? {
+  const rows = summary ?? {
     teams: 0,
     teams_verified: 0,
     participants: 0,
     participants_verified: 0,
-    checked_in: 0,
+    teams_checked_in: 0,
     submissions: 0,
     judges: 0,
     volunteers: 0,
     flags: 0,
+    audit: [],
   };
+  const audit = rows.audit;
 
   const assignments = progress.reduce((sum, row) => sum + row.judges, 0);
   const complete = progress.reduce((sum, row) => sum + row.complete, 0);
@@ -98,7 +99,11 @@ export default async function AdminOverview({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[
           ["Participants", rows.participants, `${rows.participants_verified} on verified teams`],
-          ["Checked in", rows.checked_in, pct(rows.checked_in, rows.participants_verified) + " of verified"],
+          [
+            "Teams checked in",
+            `${rows.teams_checked_in}/${rows.teams}`,
+            pct(rows.teams_checked_in, rows.teams) + " of teams · lead only",
+          ],
           ["Submissions", rows.submissions, `${rows.flags} repo flags`],
           ["Judging coverage", `${complete}/${assignments}`, `${teamsWithTwo}/${rows.teams_verified} teams at 2+ sheets`],
         ].map(([label, value, hint]) => (
@@ -110,40 +115,42 @@ export default async function AdminOverview({
         ))}
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1.25fr_1fr]">
+      <div className="grid gap-5 lg:grid-cols-2">
         <section className="card-pad">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold uppercase tracking-wide text-ink-500">Meals served</h2>
+            <h2 className="text-sm font-bold uppercase tracking-wide text-ink-500">Check-in</h2>
             <Link href="/volunteer" className="text-xs font-semibold text-spark-700">
               Scanner →
             </Link>
           </div>
-          <ul className="mt-4 divide-y divide-ink-100">
-            {meals.map((meal) => {
-              const total = Math.max(rows.participants_verified, 1);
-              const percent = Math.min(100, Math.round((meal.scans / total) * 100));
-              return (
-                <li key={meal.key} className="py-3">
-                  <div className="flex items-baseline justify-between">
-                    <span className="text-sm font-semibold text-ink-900">{meal.label}</span>
-                    <span className="font-mono text-sm tabular-nums text-ink-600">
-                      {meal.scans} / {rows.participants_verified}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-ink-100">
-                    <div
-                      className="h-full rounded-full bg-spark-500"
-                      style={{ width: `${percent}%` }}
-                    />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-          <p className="mt-3 text-xs text-ink-500">
-            A second scan for the same participant and meal is rejected by a unique constraint, so
-            these numbers cannot double-count.
+          <p className="mt-4 font-mono text-3xl font-bold tabular-nums text-ink-900">
+            {rows.teams_checked_in}
+            <span className="text-sm font-normal text-ink-400"> / {rows.teams} teams</span>
           </p>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-ink-100">
+            <div
+              className="h-full rounded-full bg-spark-500"
+              style={{ width: `${Math.min(100, Math.round((rows.teams_checked_in / Math.max(rows.teams, 1)) * 100))}%` }}
+            />
+          </div>
+          <p className="mt-3 text-xs text-ink-500">
+            The team QR checks in the <strong>team lead only</strong>; the rest of the team is not
+            marked present. Meals are not scanned at this event.
+          </p>
+          <dl className="mt-4 space-y-2 text-sm">
+            <div className="flex items-center justify-between">
+              <dt className="text-ink-600">Teams not yet checked in</dt>
+              <dd className="font-mono font-semibold tabular-nums text-ink-900">
+                {Math.max(0, rows.teams - rows.teams_checked_in)}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-ink-600">Leads on verified teams checked in</dt>
+              <dd className="font-mono font-semibold tabular-nums text-ink-900">
+                {pct(rows.teams_checked_in, rows.teams)}
+              </dd>
+            </div>
+          </dl>
         </section>
 
         <section className="card-pad">

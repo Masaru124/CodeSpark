@@ -61,14 +61,29 @@ function qrSecret(): string {
   return secret;
 }
 
+// Importing the HMAC key costs more than signing with it; the roster signs one
+// token per team and the scanner verifies one per scan, so cache the key.
+let cachedKey: { secret: string; key: Promise<CryptoKey> } | null = null;
+
+function hmacKey(): Promise<CryptoKey> {
+  const secret = qrSecret();
+  if (!cachedKey || cachedKey.secret !== secret) {
+    cachedKey = {
+      secret,
+      key: crypto.subtle.importKey(
+        "raw",
+        encoder.encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      ),
+    };
+  }
+  return cachedKey.key;
+}
+
 async function hmac(value: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(qrSecret()),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
+  const key = await hmacKey();
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
   return bytesToB64url(new Uint8Array(signature).slice(0, 16));
 }
@@ -81,6 +96,29 @@ export function expandUuid(compact: string): string | null {
   const hex = compact.toLowerCase();
   if (!/^[0-9a-f]{32}$/.test(hex)) return null;
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// ------------------------------------------------------------- team passes
+// One pass per team: token = "t" + 32 hex chars of the team uuid + HMAC.
+// The `t` prefix keeps team tokens from ever verifying as a participant token.
+
+export async function signTeamToken(teamId: string): Promise<string> {
+  const payload = `t${compactUuid(teamId)}`;
+  return `${payload}.${await hmac(`team:${payload}`)}`;
+}
+
+export async function verifyTeamToken(token: string): Promise<string | null> {
+  const trimmed = token.trim();
+  const dot = trimmed.indexOf(".");
+  if (dot < 0) return null;
+  const payload = trimmed.slice(0, dot);
+  const signature = trimmed.slice(dot + 1);
+  if (!payload.startsWith("t")) return null;
+  const uuid = expandUuid(payload.slice(1));
+  if (!uuid) return null;
+  const expected = await hmac(`team:${payload}`);
+  if (!timingSafeEqual(expected, signature)) return null;
+  return uuid;
 }
 
 export async function signQrToken(participantId: string): Promise<string> {

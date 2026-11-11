@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import crypto from "node:crypto";
 import { neon } from "@neondatabase/serverless";
+import Papa from "papaparse";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
@@ -315,6 +316,114 @@ async function demo() {
   console.log("demo: volunteer codes and judge codes are visible at /admin/judging");
 }
 
+/**
+ * Load the real registration sheet (data/codespark-teams.csv, generated from
+ * "CodeSpark Teams list.xlsx") into teams + participants. Idempotent: teams are
+ * matched on name + college, people on email, then phone, then team + name.
+ * Writes no check-ins, scans or scores.
+ */
+async function teams() {
+  const file = resolve(ROOT, process.env.TEAMS_CSV || "data/codespark-teams.csv");
+  if (!existsSync(file)) throw new Error(`missing ${file}`);
+  const parsed = Papa.parse(readFileSync(file, "utf8"), { header: true, skipEmptyLines: true });
+  const rows = parsed.data.filter((row) => row.team_name && row.participant_name);
+  if (rows.length === 0) throw new Error("no rows in the team sheet");
+
+  const digits = (value) => String(value || "").replace(/\D/g, "").slice(-10);
+  const keyOf = (row) => `${row.team_name.trim().toLowerCase()}|${(row.college || "").trim().toLowerCase()}`;
+
+  const teamSeeds = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const current = teamSeeds.get(key);
+    if (current) {
+      current.members += 1;
+      current.size = Math.max(current.size, Number(row.team_size) || 1, current.members);
+      continue;
+    }
+    teamSeeds.set(key, {
+      name: row.team_name.trim(),
+      college: (row.college || "").trim(),
+      size: Number(row.team_size) || 1,
+      members: 1,
+    });
+  }
+
+  const teamIds = new Map();
+  for (const team of teamSeeds.values()) {
+    const inserted = await q(
+      `insert into teams (name, college, size) values ($1, $2, $3)
+       on conflict (lower(name), lower(coalesce(college, ''))) do update set
+         size = greatest(teams.size, excluded.size), updated_at = now()
+       returning id`,
+      [team.name, team.college, team.size],
+    );
+    teamIds.set(`${team.name.toLowerCase()}|${team.college.toLowerCase()}`, inserted[0].id);
+  }
+
+  const existing = await q(
+    `select id, lower(email) as email,
+            right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) as phone,
+            team_id, lower(name) as name
+       from participants`,
+  );
+  const emailToId = new Map();
+  const phoneToId = new Map();
+  for (const person of existing) {
+    if (person.email) emailToId.set(person.email, person.id);
+    if (person.phone) phoneToId.set(person.phone, person.id);
+  }
+
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const teamId = teamIds.get(keyOf(row));
+    if (!teamId) {
+      skipped += 1;
+      continue;
+    }
+    const email = (row.email || "").trim().toLowerCase() || null;
+    const phone = digits(row.phone) || null;
+    const leader = String(row.is_leader || "").toLowerCase() === "true";
+    const name = row.participant_name.trim();
+    const match =
+      (email && emailToId.get(email)) ||
+      (phone && phoneToId.get(phone)) ||
+      existing.find(
+        (person) => person.team_id === teamId && person.name === name.toLowerCase(),
+      )?.id;
+
+    if (match) {
+      await q(
+        `update participants set team_id = $2, name = $3, email = coalesce($4, email),
+                phone = coalesce($5, phone), is_leader = is_leader or $6
+          where id = $1`,
+        [match, teamId, name, email, phone, leader],
+      );
+      updated += 1;
+      continue;
+    }
+
+    const inserted = await q(
+      `insert into participants (team_id, name, email, phone, is_leader)
+       values ($1, $2, $3, $4, $5) returning id`,
+      [teamId, name, email, phone, leader],
+    );
+    existing.push({ id: inserted[0].id, name: name.toLowerCase(), team_id: teamId, email, phone });
+    if (email) emailToId.set(email, inserted[0].id);
+    if (phone) phoneToId.set(phone, inserted[0].id);
+    added += 1;
+  }
+
+  const counts = await q(
+    `select (select count(*) from teams)::int as teams,
+            (select count(*) from participants)::int as participants`,
+  );
+  console.log(`teams: ${teamIds.size} teams in sheet · ${added} people added, ${updated} updated, ${skipped} skipped`);
+  console.log(`teams: database now has ${counts[0].teams} teams and ${counts[0].participants} participants`);
+}
+
 async function reset() {
   const rows = await q(
     `select tablename from pg_tables where schemaname = 'public'`,
@@ -328,9 +437,9 @@ async function reset() {
 }
 
 const command = process.argv[2] || "migrate";
-const commands = { migrate, seed, demo, reset };
+const commands = { migrate, seed, demo, teams, reset };
 if (!commands[command]) {
-  console.error(`unknown command: ${command}. Use migrate | seed | demo | reset`);
+  console.error(`unknown command: ${command}. Use migrate | seed | demo | teams | reset`);
   process.exit(1);
 }
 commands[command]().catch((error) => {

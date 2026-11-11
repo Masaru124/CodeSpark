@@ -24,7 +24,8 @@ create table if not exists teams (
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );
-create unique index if not exists teams_name_key on teams (lower(name));
+create unique index if not exists teams_name_college_key
+  on teams (lower(name), lower(coalesce(college, '')));
 create index if not exists teams_verified_idx on teams (payment_verified);
 
 -- ---------------------------------------------------------- participants
@@ -32,15 +33,16 @@ create table if not exists participants (
   id            uuid primary key default gen_random_uuid(),
   team_id       uuid not null references teams(id) on delete cascade,
   name          text not null,
-  email         text not null,
-  phone         text not null,
+  email         text,
+  phone         text,
   is_leader     boolean not null default false,
   checked_in_at timestamptz,
   created_at    timestamptz not null default now()
 );
-create unique index if not exists participants_email_key on participants (lower(email));
+create unique index if not exists participants_email_key
+  on participants (lower(email)) where email is not null;
 create unique index if not exists participants_phone_key
-  on participants (right(regexp_replace(phone, '\D', '', 'g'), 10));
+  on participants (right(regexp_replace(phone, '\D', '', 'g'), 10)) where phone is not null;
 create index if not exists participants_team_idx on participants (team_id);
 create index if not exists participants_checked_in_idx on participants (checked_in_at);
 
@@ -205,6 +207,31 @@ insert into event_config (key, value) values
   ('judging', '{"finalists":10,"screening_weight":0.3,"final_weight":0.7,"outlier_threshold":2}'::jsonb),
   ('publish', '{"published":false,"published_at":null}'::jsonb)
 on conflict (key) do nothing;
+
+-- ------------------------------------------------------------- migrations
+-- Registration sheets only carry a lead's email/phone, so teammates are stored
+-- by name alone. Existing installs are migrated to the nullable shape here.
+alter table participants alter column email drop not null;
+alter table participants alter column phone drop not null;
+
+drop index if exists teams_name_key;
+create unique index if not exists teams_name_college_key
+  on teams (lower(name), lower(coalesce(college, '')));
+
+drop index if exists participants_email_key;
+drop index if exists participants_phone_key;
+create unique index if not exists participants_email_key
+  on participants (lower(email)) where email is not null;
+create unique index if not exists participants_phone_key
+  on participants (right(regexp_replace(phone, '\D', '', 'g'), 10)) where phone is not null;
+
+-- Hot-path indexes for the team-pass scanner and the public leaderboard.
+create index if not exists meal_scans_team_meal_idx
+  on meal_scans (team_id, meal_key, participant_id);
+create index if not exists participants_team_checkin_idx
+  on participants (team_id, checked_in_at);
+create index if not exists results_published_rank_idx
+  on results (published, rank);
 
 -- ------------------------------------------------------------ repo tracker
 -- One row per team with a submitted repository: last known GitHub state.

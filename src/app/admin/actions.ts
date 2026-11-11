@@ -11,6 +11,8 @@ import { getConfig, setConfig } from "@/lib/config";
 import { computeRankings } from "@/lib/judging";
 import { inspectRepo } from "@/lib/github";
 import { syncRepoBatch, syncTeamRepo } from "@/lib/repoTracker";
+import { xlsxToCsv } from "@/lib/xlsx";
+import { canonicalCollege } from "@/lib/college";
 
 async function requireAdmin() {
   const session = await getSession();
@@ -61,7 +63,58 @@ const HEADER_ALIASES: Record<string, string> = {
   "payment ref": "payment_ref",
   ref: "payment_ref",
   leader: "is_leader",
+  // Google Forms registration layout: one row per team, one column per member.
+  "sl no": "sl_no",
+  "team lead name": "team_lead_name",
+  "team lead phone number": "phone",
+  "team lead phone": "phone",
+  "team member 2 name": "team_member_2_name",
+  "team member 3 name": "team_member_3_name",
+  "team member 4 name": "team_member_4_name",
+  "team member 5 name": "team_member_5_name",
+  "team member 6 name": "team_member_6_name",
 };
+
+function normalizeHeader(header: string): string {
+  const clean = header.trim().toLowerCase().replace(/\s+/g, " ");
+  return HEADER_ALIASES[clean] ?? clean.replace(/\s+/g, "_");
+}
+
+const cleanCell = (value: unknown) =>
+  String(value ?? "")
+    .replace(/\uFFFD/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Turn one-row-per-team sheets into one record per member. */
+function expandTeamRows(records: Record<string, string>[]): Record<string, string>[] {
+  const out: Record<string, string>[] = [];
+  for (const row of records) {
+    const members: Array<{ name: string; leader: boolean }> = [];
+    const lead = cleanCell(row.team_lead_name);
+    if (lead) members.push({ name: lead, leader: true });
+    for (let index = 2; index <= 6; index += 1) {
+      const member = cleanCell(row[`team_member_${index}_name`]);
+      if (member) members.push({ name: member, leader: false });
+    }
+    if (members.length === 0) continue;
+    for (const member of members) {
+      out.push({
+        team_name: cleanCell(row.team_name),
+        participant_name: member.name,
+        email: member.leader ? cleanCell(row.email) : "",
+        phone: member.leader ? cleanCell(row.phone) : "",
+        college: cleanCell(row.college),
+        track: cleanCell(row.track),
+        team_size: String(members.length),
+        is_leader: member.leader ? "true" : "",
+        payment_verified: cleanCell(row.payment_verified),
+        payment_ref: cleanCell(row.payment_ref),
+      });
+    }
+  }
+  return out;
+}
 
 export async function importCsv(formData: FormData) {
   const session = await requireAdmin();
@@ -70,27 +123,39 @@ export async function importCsv(formData: FormData) {
 
   let text = pasted.trim();
   if (file instanceof File && file.size > 0) {
-    if (file.size > 2_000_000) back("/admin/import", { error: "CSV is larger than 2 MB" });
-    text = (await file.text()).trim();
+    if (file.size > 6_000_000) back("/admin/import", { error: "File is larger than 6 MB" });
+    if (file.name.toLowerCase().endsWith(".xlsx")) {
+      try {
+        text = await xlsxToCsv(new Uint8Array(await file.arrayBuffer()));
+      } catch (error) {
+        back("/admin/import", {
+          error: `Could not read ${file.name}: ${error instanceof Error ? error.message : "not a valid workbook"}`,
+        });
+      }
+    } else {
+      text = (await file.text()).trim();
+    }
   }
-  if (!text) back("/admin/import", { error: "Paste a CSV or choose a file" });
+  if (!text) back("/admin/import", { error: "Choose an .xlsx / .csv file or paste a CSV" });
 
   const parsed = Papa.parse<Record<string, string>>(text, {
     header: true,
     skipEmptyLines: true,
-    transformHeader: (header) => {
-      const clean = header.trim().toLowerCase();
-      return HEADER_ALIASES[clean] ?? clean.replace(/\s+/g, "_");
-    },
+    transformHeader: normalizeHeader,
   });
 
-  const rows = parsed.data.filter((row) => row.email || row.participant_name);
-  if (rows.length === 0) back("/admin/import", { error: "No usable rows found in the CSV" });
-  if (rows.length > 2000) back("/admin/import", { error: "Import at most 2000 rows at a time" });
+  const records = parsed.data.filter(
+    (row) => row.team_name || row.email || row.participant_name || row.team_lead_name,
+  );
+  const wide = records.some(
+    (row) => row.team_lead_name || Object.keys(row).some((key) => /^team_member_\d+_name$/.test(key)),
+  );
+  const expanded = wide ? expandTeamRows(records) : records;
+  if (expanded.length === 0) back("/admin/import", { error: "No usable rows found in the file" });
+  if (expanded.length > 2000) back("/admin/import", { error: "Import at most 2000 people at a time" });
 
   let skipped = 0;
 
-  // 1. Normalise and dedupe inside the file (last row wins per email).
   type Row = {
     teamName: string;
     college: string | null;
@@ -98,92 +163,121 @@ export async function importCsv(formData: FormData) {
     size: number;
     verified: boolean;
     paymentRef: string | null;
-    email: string;
-    phone: string;
+    email: string | null;
+    phone: string | null;
     name: string;
     isLeader: boolean;
   };
-  const byEmail = new Map<string, Row>();
+  const byKey = new Map<string, Row>();
   const phoneOwner = new Map<string, string>();
 
-  for (const row of rows) {
-    const email = (row.email || "").trim().toLowerCase();
-    const phone = digitsOnly(row.phone || "");
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || phone.length !== 10) {
+  for (const row of expanded) {
+    const teamName = cleanCell(row.team_name) || "Unnamed team";
+    const emailRaw = cleanCell(row.email).toLowerCase();
+    const email = emailRaw && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw) ? emailRaw : null;
+    if (emailRaw && !email) {
       skipped += 1;
       continue;
     }
-    const owner = phoneOwner.get(phone);
-    if (owner && owner !== email) {
+    const digits = digitsOnly(row.phone ?? "");
+    const phone = digits.length === 10 ? digits : null;
+    const name = cleanCell(row.participant_name) || (email ? email.split("@")[0] : "");
+    if (!name) {
       skipped += 1;
       continue;
     }
-    phoneOwner.set(phone, email);
-    byEmail.set(email, {
-      teamName: (row.team_name || row.college || "Unnamed team").trim().slice(0, 120),
-      college: (row.college || "").trim().slice(0, 120) || null,
-      track: (row.track || "").trim().slice(0, 80) || null,
+    const key = email ? `email:${email}` : `name:${teamName.toLowerCase()}|${name.toLowerCase()}`;
+    if (phone) {
+      const owner = phoneOwner.get(phone);
+      if (owner && owner !== key) {
+        skipped += 1;
+        continue;
+      }
+      phoneOwner.set(phone, key);
+    }
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.isLeader = existing.isLeader || asBool(row.is_leader);
+      existing.phone = existing.phone ?? phone;
+      existing.email = existing.email ?? email;
+      continue;
+    }
+    byKey.set(key, {
+      teamName,
+      college: canonicalCollege(cleanCell(row.college)),
+      track: cleanCell(row.track) || null,
       size: Math.max(1, Math.min(10, Number(row.team_size) || 1)),
       verified: asBool(row.payment_verified),
-      paymentRef: (row.payment_ref || "").trim().slice(0, 120) || null,
+      paymentRef: cleanCell(row.payment_ref) || null,
       email,
       phone,
-      name: (row.participant_name || email.split("@")[0] || "Participant").trim().slice(0, 120),
+      name,
       isLeader: asBool(row.is_leader),
     });
   }
 
-  if (byEmail.size === 0) {
-    back("/admin/import", { error: "No valid rows (email + 10-digit phone required)" });
+  if (byKey.size === 0) {
+    back("/admin/import", { error: "No valid rows (a team and a participant name are required)" });
   }
 
   try {
-    // 2. Reject rows whose phone already belongs to a different person.
-    const existing = await q<{ email: string; phone: string }>(
-      `select lower(email) as email, right(regexp_replace(phone, '\\D', '', 'g'), 10) as phone
+    const existingPeople = await q<{
+      id: string;
+      email: string | null;
+      phone: string | null;
+      team_id: string;
+      name: string;
+    }>(
+      `select id, lower(email) as email,
+              right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) as phone,
+              team_id, lower(name) as name
          from participants`,
     );
-    const dbPhoneOwner = new Map(existing.map((row) => [row.phone, row.email]));
-    const keep: Row[] = [];
-    for (const row of byEmail.values()) {
-      const owner = dbPhoneOwner.get(row.phone);
-      if (owner && owner !== row.email) {
-        skipped += 1;
-        continue;
-      }
-      keep.push(row);
+    const emailToId = new Map<string, string>();
+    const phoneToId = new Map<string, string>();
+    for (const person of existingPeople) {
+      if (person.email) emailToId.set(person.email, person.id);
+      if (person.phone) phoneToId.set(person.phone, person.id);
     }
 
-    // 3. Upsert teams in bulk, then map name -> id.
-    const teams = new Map<
-      string,
-      { teamName: string; college: string | null; track: string | null; size: number; verified: boolean; paymentRef: string | null }
-    >();
-    for (const row of keep) {
-      const key = row.teamName.toLowerCase();
-      const current = teams.get(key);
+    // Teams are keyed by name + college, so two squads may share a name
+    // (the registration sheet really does contain two "Alpha Coders").
+    type TeamSeed = {
+      name: string;
+      college: string | null;
+      track: string | null;
+      size: number;
+      verified: boolean;
+      paymentRef: string | null;
+      members: number;
+    };
+    const teamSeeds = new Map<string, TeamSeed>();
+    const teamKeyOf = (row: Row) =>
+      `${row.teamName.toLowerCase()}|${(row.college ?? "").toLowerCase()}`;
+
+    for (const row of byKey.values()) {
+      const key = teamKeyOf(row);
+      const current = teamSeeds.get(key);
       if (!current) {
-        teams.set(key, {
-          teamName: row.teamName,
+        teamSeeds.set(key, {
+          name: row.teamName,
           college: row.college,
           track: row.track,
           size: row.size,
           verified: row.verified,
           paymentRef: row.paymentRef,
+          members: 1,
         });
         continue;
       }
-      teams.set(key, {
-        ...current,
-        college: current.college ?? row.college,
-        track: current.track ?? row.track,
-        size: Math.max(current.size, row.size),
-        verified: current.verified || row.verified,
-        paymentRef: current.paymentRef ?? row.paymentRef,
-      });
+      current.members += 1;
+      current.size = Math.max(current.size, row.size, current.members);
+      current.track = current.track ?? row.track;
+      current.verified = current.verified || row.verified;
+      current.paymentRef = current.paymentRef ?? row.paymentRef;
     }
 
-    const teamList = [...teams.values()];
+    const teamList = [...teamSeeds.values()];
     const teamIds = new Map<string, string>();
     for (let i = 0; i < teamList.length; i += 200) {
       const chunk = teamList.slice(i, i + 200);
@@ -193,60 +287,82 @@ export async function importCsv(formData: FormData) {
           return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
         })
         .join(", ");
-      const inserted = await q<{ id: string; key: string }>(
+      const inserted = await q<{ id: string; team_name: string; college: string }>(
         `insert into teams (name, college, track, size, payment_verified, payment_ref)
          values ${values}
-         on conflict (lower(name)) do update set
-           college = coalesce(nullif(excluded.college, ''), teams.college),
+         on conflict (lower(name), lower(coalesce(college, ''))) do update set
            track = coalesce(nullif(excluded.track, ''), teams.track),
            size = greatest(teams.size, excluded.size),
            payment_verified = teams.payment_verified or excluded.payment_verified,
            payment_ref = coalesce(teams.payment_ref, excluded.payment_ref),
            updated_at = now()
-         returning id, lower(name) as key`,
+         returning id, lower(name) as team_name, lower(coalesce(college, '')) as college`,
         chunk.flatMap((team) => [
-          team.teamName,
-          team.college,
+          team.name,
+          team.college ?? "",
           team.track,
           team.size,
           team.verified,
           team.paymentRef,
         ]),
       );
-      for (const row of inserted) teamIds.set(row.key, row.id);
+      for (const row of inserted) teamIds.set(`${row.team_name}|${row.college}`, row.id);
     }
 
-    // 4. Upsert participants in chunks.
     let participantsAdded = 0;
     let participantsUpdated = 0;
-    for (let i = 0; i < keep.length; i += 300) {
-      const chunk = keep.slice(i, i + 300);
+    const newRows: Array<{ teamId: string; row: Row }> = [];
+
+    for (const row of byKey.values()) {
+      const teamId = teamIds.get(teamKeyOf(row));
+      if (!teamId) {
+        skipped += 1;
+        continue;
+      }
+      const emailMatch = row.email ? emailToId.get(row.email) : undefined;
+      const match =
+        emailMatch ??
+        (row.phone ? phoneToId.get(row.phone) : undefined) ??
+        existingPeople.find(
+          (person) => person.team_id === teamId && person.name === row.name.toLowerCase(),
+        )?.id;
+
+      if (match) {
+        await q(
+          `update participants
+              set team_id = $2,
+                  name = $3,
+                  email = coalesce($4, email),
+                  phone = coalesce($5, phone),
+                  is_leader = is_leader or $6
+            where id = $1`,
+          [match, teamId, row.name, row.email, row.phone, row.isLeader],
+        );
+        if (row.email) emailToId.set(row.email, match);
+        if (row.phone) phoneToId.set(row.phone, match);
+        participantsUpdated += 1;
+        continue;
+      }
+
+      newRows.push({ teamId, row });
+      if (row.email) emailToId.set(row.email, "pending");
+      if (row.phone) phoneToId.set(row.phone, "pending");
+    }
+
+    for (let i = 0; i < newRows.length; i += 300) {
+      const chunk = newRows.slice(i, i + 300);
       const values = chunk
         .map((_, index) => {
           const base = index * 5;
           return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
         })
         .join(", ");
-      const result = await q<{ inserted: boolean }>(
+      await q(
         `insert into participants (team_id, name, email, phone, is_leader)
-         values ${values}
-         on conflict (lower(email)) do update set
-           name = excluded.name,
-           phone = excluded.phone,
-           team_id = excluded.team_id
-         returning (xmax = 0) as inserted`,
-        chunk.flatMap((row) => [
-          teamIds.get(row.teamName.toLowerCase()) ?? null,
-          row.name,
-          row.email,
-          row.phone,
-          row.isLeader,
-        ]),
+         values ${values}`,
+        chunk.flatMap(({ teamId, row }) => [teamId, row.name, row.email, row.phone, row.isLeader]),
       );
-      for (const row of result) {
-        if (row.inserted) participantsAdded += 1;
-        else participantsUpdated += 1;
-      }
+      participantsAdded += chunk.length;
     }
 
     await recordAudit({
@@ -255,7 +371,7 @@ export async function importCsv(formData: FormData) {
       action: "import.csv",
       entity: "teams",
       payload: {
-        rows: rows.length,
+        rows: expanded.length,
         teams: teamList.length,
         participantsAdded,
         participantsUpdated,
@@ -264,9 +380,10 @@ export async function importCsv(formData: FormData) {
     });
     revalidatePath("/admin");
     revalidatePath("/admin/teams");
+    revalidatePath("/admin/judging");
     back("/admin/import", {
       ok: `${participantsAdded} added, ${participantsUpdated} updated across ${teamList.length} teams${
-        skipped ? `, ${skipped} skipped (bad or duplicate email/phone)` : ""
+        skipped ? `, ${skipped} skipped (invalid or duplicate email/phone)` : ""
       }`,
     });
   } catch (error) {
@@ -282,7 +399,7 @@ export async function importCsv(formData: FormData) {
 export async function createTeam(formData: FormData) {
   const session = await requireAdmin();
   const name = String(formData.get("name") ?? "").trim().slice(0, 120);
-  const college = String(formData.get("college") ?? "").trim().slice(0, 120) || null;
+  const college = canonicalCollege(String(formData.get("college") ?? "").slice(0, 120));
   const track = String(formData.get("track") ?? "").trim().slice(0, 80) || null;
   const requestedSize = Number(formData.get("size"));
   const size = Number.isFinite(requestedSize) ? Math.max(1, Math.min(10, Math.trunc(requestedSize))) : 1;
@@ -295,7 +412,7 @@ export async function createTeam(formData: FormData) {
   const team = await one<{ id: string }>(
     `insert into teams (name, college, track, size, payment_verified, payment_ref)
      values ($1, $2, $3, $4, $5, $6)
-     on conflict (lower(name)) do nothing
+     on conflict (lower(name), lower(coalesce(college, ''))) do nothing
      returning id`,
     [name, college, track, size, verified, paymentRef],
   );
@@ -349,6 +466,45 @@ export async function deleteTeam(formData: FormData) {
     ok: `${team.name} deleted with ${team.participants} participant${
       team.participants === 1 ? "" : "s"
     }`,
+  });
+}
+
+export async function deleteAllTeams(formData: FormData) {
+  const session = await requireAdmin();
+  const confirm = String(formData.get("confirm") ?? "").trim();
+  if (confirm !== "DELETE ALL TEAMS") {
+    back("/admin/teams", { error: "Type DELETE ALL TEAMS exactly to confirm" });
+  }
+
+  const before = await one<{ teams: number; participants: number; scans: number }>(
+    `select (select count(*) from teams)::int as teams,
+            (select count(*) from participants)::int as participants,
+            (select count(*) from meal_scans)::int as scans`,
+  );
+  if (!before || before.teams === 0) {
+    back("/admin/teams", { error: "There are no teams to delete" });
+  }
+
+  // FKs cascade to participants, check-ins, meal scans, assignments, scores,
+  // submissions, results and repo rows; staff accounts and audit stay.
+  await q(`delete from teams`);
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "team.delete_all",
+    entity: "team",
+    payload: before,
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/teams");
+  revalidatePath("/admin/judging");
+  revalidatePath("/admin/results");
+  revalidatePath("/admin/report");
+  revalidatePath("/admin/repos");
+  revalidatePath("/results");
+  back("/admin/teams", {
+    ok: `Deleted all ${before.teams} teams and ${before.participants} participants`,
   });
 }
 
@@ -612,6 +768,85 @@ export async function removeConflict(formData: FormData) {
   await q(`delete from conflicts where judge_id = $1 and team_id = $2`, [judgeId, teamId]);
   revalidatePath("/admin/judging");
   back("/admin/judging", { ok: "Conflict removed" });
+}
+
+export async function manualAssign(formData: FormData) {
+  const session = await requireAdmin();
+  const judgeId = String(formData.get("judgeId") ?? "");
+  const teamId = String(formData.get("teamId") ?? "");
+  const round = String(formData.get("round") ?? "screening") === "final" ? "final" : "screening";
+  if (!judgeId || !teamId) back("/admin/judging", { error: "Pick a judge and a team" });
+
+  const conflict = await one(
+    `select 1 as found from conflicts where judge_id = $1 and team_id = $2`,
+    [judgeId, teamId],
+  );
+  if (conflict) {
+    back("/admin/judging", { error: "That judge has a declared conflict with this team" });
+  }
+
+  const created = await one<{ id: string }>(
+    `insert into assignments (judge_id, team_id, round) values ($1, $2, $3)
+     on conflict (judge_id, team_id, round) do nothing
+     returning id`,
+    [judgeId, teamId, round],
+  );
+  if (!created) {
+    back("/admin/judging", { error: "That judge is already assigned to this team in that round" });
+  }
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "assign.manual",
+    entity: "assignment",
+    entityId: created.id,
+    payload: { judgeId, teamId, round },
+  });
+  revalidatePath("/admin/judging");
+  back("/admin/judging", { ok: `Assigned for the ${round} round` });
+}
+
+export async function removeAssignment(formData: FormData) {
+  const session = await requireAdmin();
+  const assignmentId = String(formData.get("assignmentId") ?? "");
+  if (!assignmentId) back("/admin/judging", { error: "Missing assignment" });
+
+  const assignment = await one<{
+    id: string;
+    round: string;
+    team_name: string;
+    judge_name: string;
+    scores: number;
+  }>(
+    `select a.id, a.round, t.name as team_name, j.name as judge_name,
+            (select count(*) from scores s where s.assignment_id = a.id)::int as scores
+       from assignments a
+       join teams t on t.id = a.team_id
+       join judges j on j.id = a.judge_id
+      where a.id = $1`,
+    [assignmentId],
+  );
+  if (!assignment) back("/admin/judging", { error: "Assignment not found" });
+  if (Number(assignment.scores) > 0) {
+    back("/admin/judging", {
+      error: `${assignment.judge_name} already scored ${assignment.team_name} — delete those scores first`,
+    });
+  }
+
+  await q(`delete from assignments where id = $1`, [assignmentId]);
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "assign.remove",
+    entity: "assignment",
+    entityId: assignmentId,
+    payload: { round: assignment.round, judge: assignment.judge_name, team: assignment.team_name },
+  });
+  revalidatePath("/admin/judging");
+  back("/admin/judging", {
+    ok: `Removed ${assignment.judge_name} from ${assignment.team_name} (${assignment.round})`,
+  });
 }
 
 // ----------------------------------------------------------------- results

@@ -1,4 +1,5 @@
 import { one, q } from "@/lib/db";
+import { createTtlCache } from "@/lib/cache";
 
 export type EventInfo = {
   name: string;
@@ -37,24 +38,29 @@ const FALLBACK: PlatformConfig = {
   publish: { published: false, published_at: null },
 };
 
-// Short TTL per isolate. Keeps the hot read path off the database under load,
-// while a publish toggle still lands within a few seconds everywhere.
-const TTL_MS = 5_000;
-let cache: { at: number; value: PlatformConfig } | null = null;
+// Short TTL per isolate with request coalescing. Keeps the hot read path off
+// the database under load, while a publish toggle still lands within seconds.
+const CONFIG_TTL_MS = 5_000;
+const cache = createTtlCache<PlatformConfig>(CONFIG_TTL_MS, 8);
 
 export async function getConfig(force = false): Promise<PlatformConfig> {
-  if (!force && cache && Date.now() - cache.at < TTL_MS) return cache.value;
-  const rows = await q<{ key: string; value: unknown }>(
-    `select key, value from event_config where key in ('event','judging','publish')`,
-  );
-  const merged: PlatformConfig = { ...FALLBACK, ...FALLBACK, event: { ...FALLBACK.event }, judging: { ...FALLBACK.judging }, publish: { ...FALLBACK.publish } };
-  for (const row of rows) {
-    if (row.key === "event") merged.event = { ...FALLBACK.event, ...(row.value as EventInfo) };
-    if (row.key === "judging") merged.judging = { ...FALLBACK.judging, ...(row.value as JudgingConfig) };
-    if (row.key === "publish") merged.publish = { ...FALLBACK.publish, ...(row.value as PublishConfig) };
-  }
-  cache = { at: Date.now(), value: merged };
-  return merged;
+  if (force) cache.delete("config");
+  return cache.get("config", async () => {
+    const rows = await q<{ key: string; value: unknown }>(
+      `select key, value from event_config where key in ('event','judging','publish')`,
+    );
+    const merged: PlatformConfig = {
+      event: { ...FALLBACK.event },
+      judging: { ...FALLBACK.judging },
+      publish: { ...FALLBACK.publish },
+    };
+    for (const row of rows) {
+      if (row.key === "event") merged.event = { ...FALLBACK.event, ...(row.value as EventInfo) };
+      if (row.key === "judging") merged.judging = { ...FALLBACK.judging, ...(row.value as JudgingConfig) };
+      if (row.key === "publish") merged.publish = { ...FALLBACK.publish, ...(row.value as PublishConfig) };
+    }
+    return merged;
+  });
 }
 
 export async function setConfig(key: keyof PlatformConfig, value: unknown) {
@@ -63,5 +69,5 @@ export async function setConfig(key: keyof PlatformConfig, value: unknown) {
      on conflict (key) do update set value = excluded.value, updated_at = now()`,
     [key, JSON.stringify(value)],
   );
-  cache = null;
+  cache.delete("config");
 }

@@ -1,22 +1,24 @@
 import { fail, json } from "@/lib/api";
 import { apiRole } from "@/lib/session";
 import { q } from "@/lib/db";
-import { signQrToken } from "@/lib/crypto";
+import { signTeamToken } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
 type RosterEntry = {
   token: string;
-  name: string;
   team: string;
-  checkedInAt: string | null;
-  meals: string[];
+  college: string | null;
+  total: number;
+  checkedIn: number;
+  lead: string | null;
+  leadCheckedIn: boolean;
 };
 
 // The roster changes only when a team is imported, so a short per-isolate cache
 // keeps 500 concurrent scanners off the database.
 const TTL_MS = 30_000;
-let cache: { at: number; payload: { generatedAt: string; participants: RosterEntry[] } } | null = null;
+let cache: { at: number; payload: { generatedAt: string; teams: RosterEntry[] } } | null = null;
 
 export async function GET() {
   const session = await apiRole("volunteer", "admin");
@@ -29,30 +31,36 @@ export async function GET() {
   const rows = await q<{
     id: string;
     name: string;
-    team: string;
-    checked_in_at: string | null;
-    meals: string[] | null;
+    college: string | null;
+    total: number;
+    checked_in: number;
+    lead: string | null;
+    lead_checked_in: boolean;
   }>(
-    `select p.id, p.name, t.name as team, p.checked_in_at,
-            array_remove(array_agg(ms.meal_key), null) as meals
-       from participants p
-       join teams t on t.id = p.team_id
-       left join meal_scans ms on ms.participant_id = p.id
-      group by p.id, p.name, t.name, p.checked_in_at
-      order by t.name, p.name`,
+    `select t.id, t.name, t.college,
+            count(p.id)::int as total,
+            count(p.checked_in_at)::int as checked_in,
+            (array_agg(p.name order by p.is_leader desc, p.created_at, p.name))[1] as lead,
+            coalesce((array_agg(p.checked_in_at is not null
+               order by p.is_leader desc, p.created_at, p.name))[1], false) as lead_checked_in
+       from teams t left join participants p on p.team_id = t.id
+      group by t.id
+      order by t.name`,
   );
 
-  const participants: RosterEntry[] = await Promise.all(
+  const teams: RosterEntry[] = await Promise.all(
     rows.map(async (row) => ({
-      token: await signQrToken(row.id),
-      name: row.name,
-      team: row.team,
-      checkedInAt: row.checked_in_at,
-      meals: row.meals ?? [],
+      token: await signTeamToken(row.id),
+      team: row.name,
+      college: row.college,
+      total: Number(row.total),
+      checkedIn: Number(row.checked_in),
+      lead: row.lead,
+      leadCheckedIn: Boolean(row.lead_checked_in),
     })),
   );
 
-  const payload = { generatedAt: new Date().toISOString(), participants };
+  const payload = { generatedAt: new Date().toISOString(), teams };
   cache = { at: Date.now(), payload };
   return json({ ok: true, cached: false, ...payload });
 }

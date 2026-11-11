@@ -4,22 +4,20 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { one, q } from "@/lib/db";
 import { getConfig } from "@/lib/config";
-import { verifyQrToken } from "@/lib/crypto";
+import { verifyTeamToken } from "@/lib/crypto";
 import { inspectRepo } from "@/lib/github";
 import { recordAudit } from "@/lib/api";
+import { passCache } from "@/lib/pass-cache";
 
 const URL_PATTERN = /^https?:\/\/[^\s]+$/i;
 
 export async function submitProject(formData: FormData) {
   const token = String(formData.get("token") ?? "");
-  const participantId = await verifyQrToken(token);
-  if (!participantId) redirect("/");
+  const teamId = await verifyTeamToken(token);
+  if (!teamId) redirect("/");
 
-  const participant = await one<{ team_id: string; name: string }>(
-    `select team_id, name from participants where id = $1`,
-    [participantId],
-  );
-  if (!participant) redirect("/");
+  const team = await one<{ name: string }>(`select name from teams where id = $1`, [teamId]);
+  if (!team) redirect("/");
 
   const back = `/pass/${token}`;
   const config = await getConfig(true);
@@ -65,7 +63,7 @@ export async function submitProject(formData: FormData) {
        commit_flag = excluded.commit_flag,
        updated_at = now()`,
     [
-      participant.team_id,
+      teamId,
       repoUrl,
       videoUrl,
       slidesUrl,
@@ -77,21 +75,79 @@ export async function submitProject(formData: FormData) {
   );
 
   if (track) {
-    await q(`update teams set track = $2, updated_at = now() where id = $1`, [
-      participant.team_id,
-      track,
-    ]);
+    await q(`update teams set track = $2, updated_at = now() where id = $1`, [teamId, track]);
   }
 
   await recordAudit({
-    actor: participant.name,
+    actor: team.name,
     role: "participant",
     action: "submission.save",
     entity: "team",
-    entityId: participant.team_id,
+    entityId: teamId,
     payload: { repoUrl, repoPublic: inspection.repoPublic, commitFlag },
   });
 
   revalidatePath(back);
   redirect(`${back}?ok=${encodeURIComponent("Submission saved")}`);
+}
+
+/**
+ * Self check-in: the pass link is the credential, so a participant can mark the
+ * team lead present without a volunteer. Only the lead is ever written, and the
+ * update is a no-op once that lead has a check-in timestamp.
+ */
+export async function checkInTeam(formData: FormData) {
+  const token = String(formData.get("token") ?? "");
+  const teamId = await verifyTeamToken(token);
+  if (!teamId) redirect("/");
+
+  const back = `/pass/${token}`;
+
+  const row = await one<{
+    team: string;
+    lead: string | null;
+    checked_in_at: string | null;
+    changed: number;
+  }>(
+    `with lead as (
+       select p.id, p.team_id, p.name, p.checked_in_at
+         from participants p
+        where p.team_id = $1
+        order by p.is_leader desc, p.created_at, p.name
+        limit 1
+     ),
+     updated as (
+       update participants p set checked_in_at = now()
+         from lead
+        where p.id = lead.id and p.checked_in_at is null
+        returning p.id, p.checked_in_at
+     )
+     select t.name as team, lead.name as lead,
+            coalesce((select checked_in_at from updated), lead.checked_in_at) as checked_in_at,
+            (select count(*) from updated)::int as changed
+       from lead join teams t on t.id = lead.team_id`,
+    [teamId],
+  );
+
+  if (!row) {
+    redirect(`${back}?error=${encodeURIComponent("This team has no registered members yet")}`);
+  }
+
+  passCache.clear();
+  revalidatePath(back);
+
+  await recordAudit({
+    actor: "self-service",
+    role: "participant",
+    action: row.changed > 0 ? "checkin.self" : "checkin.self.repeat",
+    entity: "team",
+    entityId: teamId,
+    payload: { team: row.team, lead: row.lead },
+  });
+
+  const message =
+    row.changed > 0
+      ? `${row.lead ?? "Team lead"} checked in`
+      : `${row.lead ?? "Team lead"} was already checked in`;
+  redirect(`${back}?ok=${encodeURIComponent(message)}`);
 }

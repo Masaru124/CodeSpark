@@ -11,6 +11,8 @@ const NAV = [
   ["/admin/judging", "Judging"],
   ["/admin/repos", "Repos"],
   ["/admin/results", "Results"],
+  ["/admin/report", "Report"],
+  ["/admin/export", "Export"],
   ["/admin/audit", "Audit log"],
 ];
 

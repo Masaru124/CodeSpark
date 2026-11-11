@@ -2,7 +2,7 @@ import Flash from "@/components/Flash";
 import { q } from "@/lib/db";
 import { getConfig } from "@/lib/config";
 import { findOutliers, judgingProgress } from "@/lib/judging";
-import { autoAssign, removeConflict, saveConflicts } from "../actions";
+import { autoAssign, manualAssign, removeAssignment, removeConflict, saveConflicts } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Judging" };
@@ -25,7 +25,7 @@ export default async function JudgingPage({
   const { ok, error } = await searchParams;
   const config = await getConfig();
 
-  const [judges, progress, outliers, conflicts, teams] = await Promise.all([
+  const [judges, progress, outliers, conflicts, teams, assignments] = await Promise.all([
     q<JudgeLoad>(
       `select j.id, j.name, j.active,
               count(a.id) filter (where a.round = 'screening')::int as screening,
@@ -48,6 +48,15 @@ export default async function JudgingPage({
         order by j.name, t.name`,
     ),
     q<{ id: string; name: string }>(`select id, name from teams order by name`),
+    q<{ id: string; round: string; judge_name: string; team_name: string; scores: number }>(
+      `select a.id, a.round, j.name as judge_name, t.name as team_name,
+              (select count(*) from scores s where s.assignment_id = a.id)::int as scores
+         from assignments a
+         join judges j on j.id = a.judge_id
+         join teams t on t.id = a.team_id
+        order by a.round, t.name, j.name
+        limit 400`,
+    ),
   ]);
 
   const byTeam = new Map<
@@ -154,6 +163,100 @@ export default async function JudgingPage({
         </section>
       </div>
 
+      <section className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
+        <form action={manualAssign} className="card-pad space-y-3">
+          <h2 className="text-sm font-bold text-ink-900">Assign a judge manually</h2>
+          <p className="text-xs text-ink-500">
+            Pick one judge, one team and the phase. Conflicting judges are refused; an existing
+            assignment is left untouched.
+          </p>
+          <div>
+            <label htmlFor="manualJudge" className="label">
+              Judge
+            </label>
+            <select id="manualJudge" name="judgeId" className="input" required>
+              <option value="">Select judge</option>
+              {judges.map((judge) => (
+                <option key={judge.id} value={judge.id}>
+                  {judge.name}
+                  {judge.active ? "" : " (disabled)"}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="manualTeam" className="label">
+              Team
+            </label>
+            <select id="manualTeam" name="teamId" className="input" required>
+              <option value="">Select team</option>
+              {teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="manualRound" className="label">
+              Phase
+            </label>
+            <select id="manualRound" name="round" className="input" defaultValue="screening">
+              <option value="screening">Phase 1 · screening</option>
+              <option value="final">Phase 2 · finalist</option>
+            </select>
+          </div>
+          <button type="submit" className="btn-primary w-full">
+            Assign judge
+          </button>
+        </form>
+
+        <div className="table-wrap max-h-[26rem] overflow-y-auto">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Team</th>
+                <th>Judge</th>
+                <th>Phase</th>
+                <th className="text-right">Sheet</th>
+                <th className="text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map((assignment) => (
+                <tr key={assignment.id}>
+                  <td className="font-medium text-ink-900">{assignment.team_name}</td>
+                  <td className="text-ink-600">{assignment.judge_name}</td>
+                  <td>
+                    <span className={assignment.round === "final" ? "badge-info" : "badge-neutral"}>
+                      {assignment.round === "final" ? "Phase 2" : "Phase 1"}
+                    </span>
+                  </td>
+                  <td className="text-right text-xs text-ink-500">
+                    {Number(assignment.scores) > 0 ? `${assignment.scores}/4` : "—"}
+                  </td>
+                  <td className="text-right">
+                    <form action={removeAssignment}>
+                      <input type="hidden" name="assignmentId" value={assignment.id} />
+                      <button type="submit" className="btn-ghost text-xs">
+                        Remove
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+              {assignments.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="text-ink-500">
+                    No assignments yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section>
         <h2 className="text-sm font-bold uppercase tracking-wide text-ink-500">Coverage by team</h2>
         <div className="table-wrap mt-3 max-h-[28rem] overflow-y-auto">
@@ -161,8 +264,8 @@ export default async function JudgingPage({
             <thead>
               <tr>
                 <th>Team</th>
-                <th className="text-right">Screening sheets</th>
-                <th className="text-right">Finalist sheets</th>
+                <th className="text-right">Phase 1 sheets</th>
+                <th className="text-right">Phase 2 sheets</th>
                 <th>Status</th>
               </tr>
             </thead>

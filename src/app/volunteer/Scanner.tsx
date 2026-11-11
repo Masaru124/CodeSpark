@@ -4,14 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { newClientUuid, queueAll, queueDelete, queuePut } from "@/lib/offline";
 
-type Mode = "checkin" | "lunch" | "snacks" | "dinner";
-
 type RosterEntry = {
   token: string;
-  name: string;
   team: string;
-  checkedInAt: string | null;
-  meals: string[];
+  college: string | null;
+  total: number;
+  checkedIn: number;
+  lead: string | null;
+  leadCheckedIn: boolean;
 };
 
 type Feedback = {
@@ -21,21 +21,14 @@ type Feedback = {
   at?: number;
 };
 
-type HistoryEntry = { name: string; team: string; mode: Mode; status: string; time: string };
+type HistoryEntry = { name: string; team: string; status: string; time: string };
 
-const MODES: Array<{ id: Mode; label: string }> = [
-  { id: "checkin", label: "Check-in" },
-  { id: "lunch", label: "Lunch" },
-  { id: "snacks", label: "Snacks" },
-  { id: "dinner", label: "Dinner" },
-];
-
-const ROSTER_KEY = "codespark-roster-v1";
+const ROSTER_KEY = "codespark-team-roster-v3";
 
 /**
- * Pass QR codes carry the full link (https://host/pass/<token>) so a normal
- * phone camera can open them. Older printed passes and hand-typed entries may
- * still be a bare token, so accept both and ignore any query string.
+ * Team passes carry the full link (https://host/pass/<token>) so a normal phone
+ * camera can open them. Older printed passes and hand-typed entries may still
+ * be a bare token, so accept both and ignore any query string.
  */
 function extractPassToken(raw: string): string {
   const value = raw.trim();
@@ -48,14 +41,14 @@ function extractPassToken(raw: string): string {
 export default function Scanner({
   volunteer,
   eventName,
-  deadline,
 }: {
   volunteer: string;
   eventName: string;
-  deadline: string;
 }) {
-  const [mode, setMode] = useState<Mode>("checkin");
-  const [feedback, setFeedback] = useState<Feedback>({ kind: "idle", title: "Ready to scan" });
+  const [feedback, setFeedback] = useState<Feedback>({
+    kind: "idle",
+    title: "Ready to check in",
+  });
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [pending, setPending] = useState(0);
   const [rosterInfo, setRosterInfo] = useState<{ count: number; at: string | null }>({
@@ -108,11 +101,8 @@ export default function Scanner({
     try {
       const response = await fetch("/api/scan/roster", { cache: "no-store" });
       if (!response.ok) return;
-      const data = (await response.json()) as {
-        generatedAt: string;
-        participants: RosterEntry[];
-      };
-      saveRoster(data.participants, data.generatedAt);
+      const data = (await response.json()) as { generatedAt: string; teams: RosterEntry[] };
+      saveRoster(data.teams, data.generatedAt);
     } catch {
       // offline: keep the cached roster
     }
@@ -134,31 +124,24 @@ export default function Scanner({
       return;
     }
 
-    const byMode = new Map<Mode, typeof items>();
-    for (const item of items) {
-      const itemMode = (item.payload.mode as Mode) ?? "checkin";
-      byMode.set(itemMode, [...(byMode.get(itemMode) ?? []), item]);
-    }
-
-    for (const [itemMode, group] of byMode) {
-      const batch = group.slice(0, 25);
-      try {
-        const response = await fetch("/api/scan", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mode: itemMode,
-            items: batch.map((item) => ({
-              token: item.payload.token,
-              clientUuid: item.payload.clientUuid,
-            })),
-          }),
-        });
-        if (!response.ok) continue;
+    const batch = items.slice(0, 25);
+    try {
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "checkin",
+          items: batch.map((item) => ({
+            token: item.payload.token,
+            clientUuid: item.payload.clientUuid,
+          })),
+        }),
+      });
+      if (response.ok) {
         for (const item of batch) await queueDelete(item.id);
-      } catch {
-        break;
       }
+    } catch {
+      // stay queued
     }
     await refreshPending();
   }, [refreshPending]);
@@ -176,31 +159,22 @@ export default function Scanner({
       const entry = rosterRef.current.get(token);
 
       // Offline duplicate guard using the cached roster.
-      if (entry) {
-        if (mode === "checkin" && entry.checkedInAt) {
-          setFeedback({
-            kind: "warn",
-            title: `${entry.name} already checked in`,
-            detail: entry.team,
-            at: now,
-          });
-          pushHistory({ name: entry.name, team: entry.team, mode, status: "already in", time: "now" });
-          navigator.vibrate?.(40);
-          busyRef.current = false;
-          return;
-        }
-        if (mode !== "checkin" && entry.meals.includes(mode)) {
-          setFeedback({
-            kind: "warn",
-            title: `${entry.name} already served ${mode}`,
-            detail: entry.team,
-            at: now,
-          });
-          pushHistory({ name: entry.name, team: entry.team, mode, status: `repeat ${mode}`, time: "now" });
-          navigator.vibrate?.(40);
-          busyRef.current = false;
-          return;
-        }
+      if (entry?.leadCheckedIn) {
+        setFeedback({
+          kind: "warn",
+          title: `${entry.team} lead already checked in`,
+          detail: `${entry.lead ?? "Team lead"} · ${entry.college ?? ""}`,
+          at: now,
+        });
+        pushHistory({
+          name: entry.team,
+          team: entry.college ?? "",
+          status: "already in",
+          time: "now",
+        });
+        navigator.vibrate?.(40);
+        busyRef.current = false;
+        return;
       }
 
       const clientUuid = newClientUuid();
@@ -209,7 +183,7 @@ export default function Scanner({
         const response = await fetch("/api/scan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode, items: [{ token, clientUuid }] }),
+          body: JSON.stringify({ mode: "checkin", items: [{ token, clientUuid }] }),
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = (await response.json()) as {
@@ -221,13 +195,13 @@ export default function Scanner({
         if (item.status === "ok") {
           setFeedback({
             kind: "ok",
-            title: item.name ? `${item.name} ✓ ${mode === "checkin" ? "checked in" : mode}` : item.message,
+            title: item.name ? `${item.name} ✓ ${item.message}` : item.message,
             detail: item.team,
             at: now,
           });
           navigator.vibrate?.(60);
         } else if (item.status === "duplicate") {
-          setFeedback({ kind: "warn", title: item.message, detail: item.team ?? item.name, at: now });
+          setFeedback({ kind: "warn", title: item.name ?? item.message, detail: item.message, at: now });
           navigator.vibrate?.([40, 60, 40]);
         } else {
           setFeedback({ kind: "bad", title: item.message, detail: "Ask for the printed list", at: now });
@@ -236,37 +210,36 @@ export default function Scanner({
 
         // Keep the local roster truthful so the next scan is instant.
         const rosterEntry = rosterRef.current.get(token);
-        if (rosterEntry && item.status === "ok") {
-          if (mode === "checkin") rosterEntry.checkedInAt = new Date().toISOString();
-          else rosterEntry.meals = [...rosterEntry.meals, mode];
-        }
+        if (rosterEntry && item.status === "ok") rosterEntry.leadCheckedIn = true;
+
         pushHistory({
-          name: item.name ?? "Unknown pass",
+          name: item.name ?? "Unknown team",
           team: item.team ?? "—",
-          mode,
           status: item.message,
           time: new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }),
         });
       } catch {
         await queuePut({
-          id: `scan:${mode}:${token}`,
+          id: `scan:checkin:${token}`,
           kind: "scan",
-          payload: { mode, token, clientUuid },
+          payload: { mode: "checkin", token, clientUuid },
           createdAt: now,
           attempts: 0,
         });
         await refreshPending();
         setFeedback({
           kind: "queued",
-          title: entry ? `${entry.name} queued offline` : "Queued offline",
-          detail: entry ? `${entry.team} · syncs when back online` : "Syncs when back online",
+          title: entry ? `${entry.team} queued offline` : "Queued offline",
+          detail: entry
+            ? `${entry.leadCheckedIn ? "lead already in" : "lead not in"} · syncs when back online`
+            : "Syncs when back online",
           at: now,
         });
       } finally {
         busyRef.current = false;
       }
     },
-    [mode, pushHistory, refreshPending],
+    [pushHistory, refreshPending],
   );
 
   // Boot: cached roster, fresh roster, pending scans, connectivity listeners.
@@ -356,11 +329,12 @@ export default function Scanner({
     };
   }, [cameraOn, record]);
 
-  const closed = Date.now() > new Date(deadline).getTime();
   const matches = search.trim()
     ? [...rosterRef.current.values()]
         .filter((entry) =>
-          `${entry.name} ${entry.team}`.toLowerCase().includes(search.trim().toLowerCase()),
+          `${entry.team} ${entry.college ?? ""}`
+            .toLowerCase()
+            .includes(search.trim().toLowerCase()),
         )
         .slice(0, 6)
     : [];
@@ -381,7 +355,7 @@ export default function Scanner({
       <header className="border-b border-ink-200 bg-white">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <div>
-            <p className="text-sm font-bold text-ink-900">⚡ {eventName} scanner</p>
+            <p className="text-sm font-bold text-ink-900">⚡ {eventName} check-in</p>
             <p className="text-xs text-ink-500">
               {volunteer} ·{" "}
               <span className={online ? "text-emerald-600" : "text-amber-600"}>
@@ -404,30 +378,6 @@ export default function Scanner({
       </header>
 
       <div className="mx-auto max-w-3xl space-y-4 px-4 pt-4">
-        <div className="grid grid-cols-4 gap-1.5 rounded-xl bg-ink-200/60 p-1.5">
-          {MODES.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                setMode(item.id);
-                setFeedback({ kind: "idle", title: `${item.label} mode`, detail: "Scan a pass" });
-              }}
-              className={`rounded-lg px-2 py-2.5 text-sm font-semibold transition ${
-                mode === item.id ? "bg-white text-ink-900 shadow-sm" : "text-ink-600"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-
-        {closed && mode !== "checkin" ? (
-          <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
-            The submission window has closed. Meal scanning is unaffected.
-          </p>
-        ) : null}
-
         <div className={`rounded-2xl border-2 p-5 transition ${tone}`}>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -456,7 +406,7 @@ export default function Scanner({
           </div>
           <div className="flex items-center justify-between gap-3 px-4 py-3">
             <p className="text-xs text-ink-500">
-              {rosterInfo.count} passes cached
+              {rosterInfo.count} team passes cached
               {rosterInfo.at
                 ? ` · updated ${new Date(rosterInfo.at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}`
                 : ""}
@@ -491,31 +441,33 @@ export default function Scanner({
               value={manual}
               onChange={(event) => setManual(event.target.value)}
               className="input font-mono text-xs"
-              placeholder="Paste the pass token or link"
+              placeholder="Paste the team pass token or link"
             />
             <button type="submit" className="btn-secondary">
-              Scan
+              Check in
             </button>
           </div>
 
           <div className="mt-3">
             <label htmlFor="search" className="label">
-              Find a participant by name
+              Find a team by name or college
             </label>
             <input
               id="search"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               className="input"
-              placeholder="Name or team"
+              placeholder="Team or college"
             />
             {matches.length > 0 ? (
               <ul className="mt-2 divide-y divide-ink-100 rounded-xl border border-ink-200">
                 {matches.map((entry) => (
                   <li key={entry.token} className="flex items-center justify-between gap-2 px-3 py-2">
                     <span className="min-w-0">
-                      <span className="block truncate text-sm font-medium text-ink-900">{entry.name}</span>
-                      <span className="block truncate text-xs text-ink-500">{entry.team}</span>
+                      <span className="block truncate text-sm font-medium text-ink-900">{entry.team}</span>
+                      <span className="block truncate text-xs text-ink-500">
+                        {entry.leadCheckedIn ? "lead in" : "lead out"} · {entry.college ?? "—"}
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -525,7 +477,7 @@ export default function Scanner({
                         setSearch("");
                       }}
                     >
-                      Scan
+                      Check in
                     </button>
                   </li>
                 ))}
@@ -539,8 +491,7 @@ export default function Scanner({
             <table className="table">
               <thead>
                 <tr>
-                  <th>Participant</th>
-                  <th>Mode</th>
+                  <th>Team</th>
                   <th>Result</th>
                   <th className="text-right">Time</th>
                 </tr>
@@ -552,7 +503,6 @@ export default function Scanner({
                       <span className="font-medium text-ink-900">{entry.name}</span>
                       <span className="block text-xs text-ink-500">{entry.team}</span>
                     </td>
-                    <td className="text-xs uppercase text-ink-500">{entry.mode}</td>
                     <td className="text-xs text-ink-600">{entry.status}</td>
                     <td className="text-right font-mono text-xs text-ink-500">{entry.time}</td>
                   </tr>
@@ -563,7 +513,8 @@ export default function Scanner({
         ) : null}
 
         <p className="text-center text-xs text-ink-500">
-          Duplicate scans are blocked by the database, so a double tap can never serve twice.{" "}
+          One QR per team, and it checks in the team lead only. Duplicate scans are blocked by the
+          database.{" "}
           <Link href="/" className="link">
             Home
           </Link>
