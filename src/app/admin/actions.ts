@@ -509,6 +509,29 @@ export async function deleteAllTeams(formData: FormData) {
 }
 
 // ----------------------------------------------------------------- payments
+export async function verifyAllTeams() {
+  const session = await requireAdmin();
+  const verified = await q<{ id: string }>(
+    `update teams set payment_verified = true, updated_at = now()
+      where payment_verified = false
+      returning id`,
+  );
+  if (verified.length === 0) back("/admin/teams", { ok: "All teams are already verified" });
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "payment.verify_all",
+    entity: "team",
+    payload: { teams: verified.length },
+  });
+  revalidatePath("/admin/teams");
+  revalidatePath("/admin");
+  back("/admin/teams", {
+    ok: `Verified ${verified.length} team${verified.length === 1 ? "" : "s"}`,
+  });
+}
+
 export async function togglePayment(formData: FormData) {
   const session = await requireAdmin();
   const teamId = String(formData.get("teamId") ?? "");

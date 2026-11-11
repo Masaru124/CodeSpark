@@ -2,7 +2,7 @@ import Link from "next/link";
 import Flash from "@/components/Flash";
 import ConfirmSubmitButton from "@/components/ConfirmSubmitButton";
 import { q } from "@/lib/db";
-import { createTeam, deleteAllTeams, deleteTeam, togglePayment } from "../actions";
+import { createTeam, deleteAllTeams, deleteTeam, togglePayment, verifyAllTeams } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Teams & passes" };
@@ -57,6 +57,13 @@ export default async function TeamsPage({
           <a href="/api/admin/export?type=submissions" className="btn-secondary">
             Export submissions
           </a>
+          <form action={verifyAllTeams}>
+            <ConfirmSubmitButton
+              label="Verify all teams"
+              message="Mark every team as payment verified? Teams already verified are unchanged."
+              className="btn-primary"
+            />
+          </form>
           <form className="flex gap-2" action="/admin/teams">
           <input
             name="q"
