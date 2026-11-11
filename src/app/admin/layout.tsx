@@ -1,4 +1,5 @@
 import Link from "next/link";
+import LiveRefresh from "@/components/LiveRefresh";
 import { requireRole } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +34,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <LiveRefresh label />
             <Link href="/volunteer" className="btn-secondary hidden sm:inline-flex">
               Scanner
             </Link>

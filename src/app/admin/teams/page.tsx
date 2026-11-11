@@ -53,7 +53,11 @@ export default async function TeamsPage({
             pass for lead check-in.
           </p>
         </div>
-        <form className="flex gap-2" action="/admin/teams">
+        <div className="flex flex-wrap items-center gap-2">
+          <a href="/api/admin/export?type=submissions" className="btn-secondary">
+            Export submissions
+          </a>
+          <form className="flex gap-2" action="/admin/teams">
           <input
             name="q"
             defaultValue={term}
@@ -64,7 +68,8 @@ export default async function TeamsPage({
           <button type="submit" className="btn-secondary">
             Search
           </button>
-        </form>
+          </form>
+        </div>
       </div>
 
       <details className="card-pad mb-5">

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { safeNextPath } from "@/lib/redirect";
 
 type Mode = "admin" | "judge" | "volunteer";
 
@@ -42,7 +43,7 @@ export default function LoginForm({ next }: { next?: string }) {
         setBusy(false);
         return;
       }
-      router.replace(next && next.startsWith("/") ? next : data.redirectTo || "/");
+      router.replace(safeNextPath(next) ?? data.redirectTo ?? "/");
       router.refresh();
     } catch {
       setError("Network error — check the connection and try again");

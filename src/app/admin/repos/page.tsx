@@ -2,6 +2,7 @@ import Link from "next/link";
 import Flash from "@/components/Flash";
 import { q, one } from "@/lib/db";
 import { fmtAgo, fmtDateTime } from "@/lib/format";
+import { readBudget } from "@/lib/githubBudget";
 import { syncRepoNow, syncReposNow } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +45,7 @@ export default async function ReposPage({
 }) {
   const { ok, error } = await searchParams;
 
-  const [repos, commits, missing] = await Promise.all([
+  const [repos, commits, missing, budget] = await Promise.all([
     q<TrackedRepo>(
       `with tracked as (
          select t.id as team_id, t.name as team_name, s.repo_url,
@@ -78,6 +79,7 @@ export default async function ReposPage({
       `select count(*)::int as n from teams t
         where not exists (select 1 from submissions s where s.team_id = t.id)`,
     ),
+    readBudget(),
   ]);
 
   const synced = repos.filter((repo) => repo.last_checked_at !== null);
@@ -105,17 +107,42 @@ export default async function ReposPage({
             <label htmlFor="limit" className="label">
               Batch
             </label>
-            <select id="limit" name="limit" defaultValue="15" className="input w-28">
+            <select
+              id="limit"
+              name="limit"
+              defaultValue={tokenConfigured ? "15" : "5"}
+              className="input w-28"
+              disabled={budget.paused}
+            >
               <option value="5">5 repos</option>
               <option value="15">15 repos</option>
               <option value="30">30 repos</option>
               <option value="60">60 repos</option>
             </select>
           </div>
-          <button type="submit" className="btn-primary">
+          <button type="submit" className="btn-primary" disabled={budget.paused}>
             Sync now
           </button>
         </form>
+      </div>
+
+      <div
+        className={`rounded-xl border px-4 py-3 text-sm ${
+          budget.paused
+            ? "border-rose-200 bg-rose-50 text-rose-900"
+            : "border-ink-200 bg-white text-ink-700"
+        }`}
+      >
+        <strong>GitHub quota:</strong>{" "}
+        {budget.remaining === null
+          ? "not measured yet"
+          : `${budget.remaining}${budget.limit ? ` / ${budget.limit}` : ""} requests left`}
+        {budget.resetAt ? ` · resets ${budget.resumeLabel ?? "hourly"}` : ""}
+        {budget.paused ? (
+          <span className="ml-1 font-semibold">
+            · syncing paused until {budget.resumeLabel ?? "the hourly reset"} — cached data is shown.
+          </span>
+        ) : null}
       </div>
 
       {!tokenConfigured ? (
@@ -227,7 +254,7 @@ export default async function ReposPage({
                     <div className="flex items-center justify-end gap-1.5">
                       <form action={syncRepoNow}>
                         <input type="hidden" name="teamId" value={repo.team_id} />
-                        <button type="submit" className="btn-ghost text-xs">
+                        <button type="submit" className="btn-ghost text-xs" disabled={budget.paused}>
                           Sync
                         </button>
                       </form>

@@ -542,12 +542,12 @@ export async function togglePayment(formData: FormData) {
 export async function addJudge(formData: FormData) {
   const session = await requireAdmin();
   const name = String(formData.get("name") ?? "").trim();
-  const email = String(formData.get("email") ?? "").trim().toLowerCase() || null;
   if (name.length < 2) back("/admin/staff", { error: "Judge name is required" });
 
+  // A judge only needs a name: the 6-character code is their whole login.
   const judge = await one<{ id: string; invite_code: string }>(
-    `insert into judges (name, email, invite_code) values ($1, $2, $3) returning id, invite_code`,
-    [name.slice(0, 80), email, randomCode()],
+    `insert into judges (name, invite_code) values ($1, $2) returning id, invite_code`,
+    [name.slice(0, 80), randomCode()],
   );
   await recordAudit({
     actor: session.label,
@@ -595,6 +595,70 @@ export async function setStaffActive(formData: FormData) {
   }
   revalidatePath("/admin/staff");
   back("/admin/staff", { ok: active ? "Activated" : "Deactivated" });
+}
+
+export async function deleteStaff(formData: FormData) {
+  const session = await requireAdmin();
+  const kind = String(formData.get("kind") ?? "");
+  const id = String(formData.get("id") ?? "");
+  if (!id || (kind !== "judge" && kind !== "volunteer")) {
+    back("/admin/staff", { error: "Missing staff id" });
+  }
+
+  if (kind === "judge") {
+    const judge = await one<{ name: string; assignments: number; scores: number }>(
+      `select j.name,
+              (select count(*) from assignments a where a.judge_id = j.id)::int as assignments,
+              (select count(*) from scores s
+                 join assignments a on a.id = s.assignment_id
+                where a.judge_id = j.id)::int as scores
+         from judges j where j.id = $1`,
+      [id],
+    );
+    if (!judge) back("/admin/staff", { error: "Judge not found" });
+
+    // Score sheets are judging evidence; never delete them through staff cleanup.
+    if (judge.scores > 0) {
+      back("/admin/staff", {
+        error: `${judge.name} has ${judge.scores} submitted score(s). Disable them instead so score sheets stay intact.`,
+      });
+    }
+
+    await q(`delete from judges where id = $1`, [id]);
+    await q(`delete from sessions where role = 'judge' and subject_id = $1`, [id]);
+    await recordAudit({
+      actor: session.label,
+      role: "admin",
+      action: "judge.delete",
+      entity: "judge",
+      entityId: id,
+      payload: { name: judge.name, assignments: judge.assignments, scores: judge.scores },
+    });
+    revalidatePath("/admin/staff");
+    revalidatePath("/admin/judging");
+    back("/admin/staff", {
+      ok: `${judge.name} deleted${judge.assignments ? ` with ${judge.assignments} assignment(s)` : ""}`,
+    });
+  }
+
+  const volunteer = await one<{ name: string }>(
+    `select name from volunteers where id = $1`,
+    [id],
+  );
+  if (!volunteer) back("/admin/staff", { error: "Volunteer not found" });
+
+  await q(`delete from volunteers where id = $1`, [id]);
+  await q(`delete from sessions where role = 'volunteer' and subject_id = $1`, [id]);
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "volunteer.delete",
+    entity: "volunteer",
+    entityId: id,
+    payload: { name: volunteer.name },
+  });
+  revalidatePath("/admin/staff");
+  back("/admin/staff", { ok: `${volunteer.name} deleted` });
 }
 
 // -------------------------------------------------------------- assignments

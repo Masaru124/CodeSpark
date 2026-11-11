@@ -1,3 +1,5 @@
+import { canSpend, saveBudget, type GithubBudget } from "@/lib/githubBudget";
+
 export type RepoInspection = {
   repoPublic: boolean | null;
   firstCommitAt: string | null;
@@ -52,6 +54,12 @@ function githubHeaders(): Record<string, string> {
 }
 
 const EMPTY_RATE: RepoRateLimit = { limit: null, remaining: null, resetAt: null };
+
+const rateOf = (budget: GithubBudget): RepoRateLimit => ({
+  limit: budget.limit,
+  remaining: budget.remaining,
+  resetAt: budget.resetAt,
+});
 
 /** Keeps the most pessimistic rate-limit numbers seen during one repo read. */
 function readRate(headers: Headers, current: RepoRateLimit): RepoRateLimit {
@@ -131,11 +139,17 @@ export async function inspectRepo(url: string): Promise<RepoInspection> {
     return { repoPublic: null, firstCommitAt: null, error: "Not a GitHub repository URL" };
   }
 
+  const gate = await canSpend(2);
+  if (!gate.ok) {
+    return { repoPublic: null, firstCommitAt: null, error: gate.message };
+  }
+
   try {
     const repoResponse = await fetch(
       `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`,
       { headers: githubHeaders(), signal: AbortSignal.timeout(6000), cache: "no-store" },
     );
+    void saveBudget(repoResponse.headers);
 
     if (repoResponse.status === 404) {
       return { repoPublic: false, firstCommitAt: null, error: "Repository not found or private" };
@@ -151,6 +165,7 @@ export async function inspectRepo(url: string): Promise<RepoInspection> {
       `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits?sha=${encodeURIComponent(branch)}&per_page=1&direction=asc`,
       { headers: githubHeaders(), signal: AbortSignal.timeout(6000), cache: "no-store" },
     );
+    void saveBudget(commitsResponse.headers);
 
     if (!commitsResponse.ok) {
       return { repoPublic: true, firstCommitAt: null, error: `Commit lookup failed (${commitsResponse.status})` };
@@ -186,6 +201,9 @@ export async function fetchRepoActivity(
   const base = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
   let rate = EMPTY_RATE;
 
+  const gate = await canSpend(options.withFirstCommit === false ? 2 : 3);
+  if (!gate.ok) return emptyActivity(gate.message, rateOf(gate.budget));
+
   try {
     const repoResponse = await fetch(base, {
       headers: githubHeaders(),
@@ -193,6 +211,7 @@ export async function fetchRepoActivity(
       cache: "no-store",
     });
     rate = readRate(repoResponse.headers, rate);
+    void saveBudget(repoResponse.headers);
 
     if (repoResponse.status === 404) {
       return {
@@ -232,6 +251,7 @@ export async function fetchRepoActivity(
       { headers: githubHeaders(), signal: AbortSignal.timeout(8000), cache: "no-store" },
     );
     rate = readRate(commitsResponse.headers, rate);
+    void saveBudget(commitsResponse.headers);
 
     let commits: RepoCommit[] = [];
     let totalCommits: number | null = null;
@@ -253,6 +273,7 @@ export async function fetchRepoActivity(
         { headers: githubHeaders(), signal: AbortSignal.timeout(8000), cache: "no-store" },
       );
       rate = readRate(firstResponse.headers, rate);
+      void saveBudget(firstResponse.headers);
       if (firstResponse.ok) {
         const first = (await firstResponse.json()) as RawCommit[];
         firstCommitAt = first?.[0]?.commit?.committer?.date ?? first?.[0]?.commit?.author?.date ?? null;

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getSession, homeFor } from "@/lib/session";
+import { safeNextPath } from "@/lib/redirect";
 import LoginForm from "./LoginForm";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +14,8 @@ export default async function LoginPage({
 }) {
   const session = await getSession();
   if (session) redirect(homeFor(session.role));
-  const { next } = await searchParams;
+  const { next: rawNext } = await searchParams;
+  const next = safeNextPath(rawNext);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-ink-50 px-4 py-10">

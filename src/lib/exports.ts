@@ -54,13 +54,28 @@ export const EXPORTS: Record<string, ExportDef> = {
            order by ms.scanned_at`,
   },
   submissions: {
-    label: "Submissions",
+    label: "Submissions (full)",
     filename: "codespark-submissions.csv",
     group: "Submissions",
-    sql: `select t.name as team, s.repo_url, s.video_url, s.slides_url, s.track,
-                 s.repo_public, s.first_commit_at, s.commit_flag, s.notes,
+    sql: `select t.name as team, t.college, t.size as team_size,
+                 lead.name as lead_name, lead.email as lead_email, lead.phone as lead_phone,
+                 s.track as submitted_track, t.track as team_track,
+                 s.repo_url, s.video_url, s.slides_url, s.notes,
+                 s.repo_public, s.first_commit_at, s.commit_flag,
+                 rs.repo_full_name, rs.default_branch, rs.total_commits, rs.authors,
+                 rs.stars, rs.forks, rs.open_issues, rs.last_commit_at,
+                 rs.last_checked_at, rs.error as repo_error,
                  s.submitted_at, s.updated_at
-            from submissions s join teams t on t.id = s.team_id
+            from submissions s
+            join teams t on t.id = s.team_id
+            left join lateral (
+              select p.name, p.email, p.phone
+                from participants p
+               where p.team_id = t.id and p.is_leader
+               order by p.created_at
+               limit 1
+            ) lead on true
+            left join repo_stats rs on rs.team_id = s.team_id
            order by t.name`,
   },
   scores: {

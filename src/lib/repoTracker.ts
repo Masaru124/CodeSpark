@@ -1,4 +1,5 @@
 import { one, q } from "@/lib/db";
+import { readBudget } from "@/lib/githubBudget";
 import {
   fetchRepoActivity,
   rateLimitWarning,
@@ -27,9 +28,9 @@ export type RepoSyncSummary = {
   results: RepoSyncResult[];
 };
 
-const CONCURRENCY = 4;
-/** Stop the batch once GitHub is nearly dry instead of burning 403s. */
-const RATE_FLOOR = 3;
+const CONCURRENCY = 3;
+/** One repo needs up to 3 calls; leave room for concurrent workers. */
+const RATE_FLOOR = 6;
 
 const EMPTY_RATE: RepoRateLimit = { limit: null, remaining: null, resetAt: null };
 
@@ -158,6 +159,22 @@ export async function syncTeamRepo(teamId: string): Promise<RepoSyncResult> {
  * keeps a 60-team sweep inside a normal request while GitHub stays happy.
  */
 export async function syncRepoBatch(limit = 15): Promise<RepoSyncSummary> {
+  const budget = await readBudget();
+  if (budget.paused) {
+    return {
+      checked: 0,
+      ok: 0,
+      failed: 0,
+      commits: 0,
+      stopped: true,
+      rateLimit: { limit: budget.limit, remaining: budget.remaining, resetAt: budget.resetAt },
+      warning: `GitHub quota exhausted — paused until ${
+        budget.resumeLabel ?? "the hourly reset"
+      }. Cached repo data is still shown.`,
+      results: [],
+    };
+  }
+
   const rows = await q<{ team_id: string }>(
     `select s.team_id
        from submissions s
@@ -181,6 +198,15 @@ export async function syncRepoBatch(limit = 15): Promise<RepoSyncSummary> {
 
   const worker = async () => {
     for (;;) {
+      const live = await readBudget();
+      if (live.paused) {
+        summary.stopped = true;
+        queue.length = 0;
+        summary.warning = `GitHub quota exhausted — paused until ${
+          live.resumeLabel ?? "the hourly reset"
+        }.`;
+        return;
+      }
       if (summary.rateLimit.remaining !== null && summary.rateLimit.remaining <= RATE_FLOOR) {
         summary.stopped = true;
         queue.length = 0;

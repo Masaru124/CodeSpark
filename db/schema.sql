@@ -267,3 +267,73 @@ create table if not exists repo_commits (
 );
 create index if not exists repo_commits_team_idx on repo_commits (team_id, committed_at desc);
 create index if not exists repo_commits_time_idx on repo_commits (committed_at desc);
+-- ------------------------------------------------------------ live revision
+-- One global revision, bumped by every data change. Clients poll /api/live
+-- (a single-row read) and re-render in place when the number moves.
+create table if not exists live_state (
+  id         int primary key default 1 check (id = 1),
+  revision   bigint not null default 1,
+  updated_at timestamptz not null default now()
+);
+insert into live_state (id) values (1) on conflict (id) do nothing;
+
+create or replace function bump_live() returns trigger language plpgsql as '
+begin
+  update live_state set revision = revision + 1, updated_at = now() where id = 1;
+  return null;
+end;
+';
+
+drop trigger if exists live_bump_teams on teams;
+create trigger live_bump_teams after insert or update or delete on teams for each statement execute function bump_live();
+
+drop trigger if exists live_bump_participants on participants;
+create trigger live_bump_participants after insert or update or delete on participants for each statement execute function bump_live();
+
+drop trigger if exists live_bump_meal_scans on meal_scans;
+create trigger live_bump_meal_scans after insert or update or delete on meal_scans for each statement execute function bump_live();
+
+drop trigger if exists live_bump_assignments on assignments;
+create trigger live_bump_assignments after insert or update or delete on assignments for each statement execute function bump_live();
+
+drop trigger if exists live_bump_scores on scores;
+create trigger live_bump_scores after insert or update or delete on scores for each statement execute function bump_live();
+
+drop trigger if exists live_bump_submissions on submissions;
+create trigger live_bump_submissions after insert or update or delete on submissions for each statement execute function bump_live();
+
+drop trigger if exists live_bump_results on results;
+create trigger live_bump_results after insert or update or delete on results for each statement execute function bump_live();
+
+drop trigger if exists live_bump_conflicts on conflicts;
+create trigger live_bump_conflicts after insert or update or delete on conflicts for each statement execute function bump_live();
+
+drop trigger if exists live_bump_judges on judges;
+create trigger live_bump_judges after insert or update or delete on judges for each statement execute function bump_live();
+
+drop trigger if exists live_bump_volunteers on volunteers;
+create trigger live_bump_volunteers after insert or update or delete on volunteers for each statement execute function bump_live();
+
+drop trigger if exists live_bump_repo_stats on repo_stats;
+create trigger live_bump_repo_stats after insert or update or delete on repo_stats for each statement execute function bump_live();
+
+drop trigger if exists live_bump_repo_commits on repo_commits;
+create trigger live_bump_repo_commits after insert or update or delete on repo_commits for each statement execute function bump_live();
+
+drop trigger if exists live_bump_audit on audit_log;
+create trigger live_bump_audit after insert or update or delete on audit_log for each statement execute function bump_live();
+
+drop trigger if exists live_bump_config on event_config;
+create trigger live_bump_config after insert or update or delete on event_config for each statement execute function bump_live();
+-- ----------------------------------------------------------- github quota
+-- Last seen GitHub quota, shared across instances. Calls are refused while
+-- exhausted instead of provoking 403s, and cached repo data keeps rendering.
+create table if not exists github_state (
+  id          int primary key default 1 check (id = 1),
+  remaining   int,
+  limit_total int,
+  reset_at    timestamptz,
+  checked_at  timestamptz,
+  updated_at  timestamptz not null default now()
+);
+insert into github_state (id) values (1) on conflict (id) do nothing;

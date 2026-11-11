@@ -143,6 +143,9 @@ export default async function ReportPage({
           <a href="/api/admin/export?type=results" className="btn-secondary">
             Export results
           </a>
+          <a href="/api/admin/export?type=submissions" className="btn-secondary">
+            Export submissions
+          </a>
           <a href="/api/admin/export?type=scores" className="btn-secondary">
             Export scores
           </a>

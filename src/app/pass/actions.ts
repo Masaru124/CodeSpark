@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { one, q } from "@/lib/db";
 import { getConfig } from "@/lib/config";
 import { verifyTeamToken } from "@/lib/crypto";
-import { inspectRepo } from "@/lib/github";
+import { inspectRepo, parseRepoUrl } from "@/lib/github";
 import { recordAudit } from "@/lib/api";
 import { passCache } from "@/lib/pass-cache";
 
@@ -43,7 +43,29 @@ export async function submitProject(formData: FormData) {
     }
   }
 
-  const inspection = await inspectRepo(repoUrl);
+  // Reuse a recent sync instead of spending 2 GitHub calls on a resubmission.
+  const parsedRepo = parseRepoUrl(repoUrl);
+  const recent = await one<{
+    repo_full_name: string | null;
+    repo_public: boolean | null;
+    first_commit_at: string | null;
+    error: string | null;
+  }>(
+    `select repo_full_name, repo_public, first_commit_at, error
+       from repo_stats
+      where team_id = $1 and last_checked_at > now() - interval '15 minutes'`,
+    [teamId],
+  );
+  const reusable =
+    recent &&
+    recent.error === null &&
+    parsedRepo &&
+    (recent.repo_full_name ?? "").toLowerCase() ===
+      `${parsedRepo.owner}/${parsedRepo.repo}`.toLowerCase();
+
+  const inspection = reusable
+    ? { repoPublic: recent.repo_public, firstCommitAt: recent.first_commit_at, error: null }
+    : await inspectRepo(repoUrl);
   const commitFlag =
     inspection.firstCommitAt && new Date(inspection.firstCommitAt) < new Date(config.event.hack_start)
       ? "first commit before 09:40 kickoff"

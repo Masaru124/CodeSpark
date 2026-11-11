@@ -1,4 +1,5 @@
 import Link from "next/link";
+import LiveRefresh from "@/components/LiveRefresh";
 import { requireRole } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,7 @@ export default async function JudgeLayout({ children }: { children: React.ReactN
           </div>
         </div>
       </header>
+      <LiveRefresh />
       <main className="container-page py-6">{children}</main>
     </div>
   );

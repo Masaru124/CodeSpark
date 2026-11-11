@@ -61,14 +61,14 @@ export default async function ResultsPage({
               : "not published"}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <a href="/api/admin/export?type=rankings" className="btn-secondary">
-            Export rankings
+        <div className="flex flex-wrap items-center gap-2">
+          <a href="/api/admin/export?type=results" className="btn-secondary">
+            Export results
           </a>
           <a href="/api/admin/export?type=scores" className="btn-secondary">
             Export scores
           </a>
-          <a href="/api/admin/export?type=scans" className="btn-secondary">
+          <a href="/api/admin/export?type=meals" className="btn-secondary">
             Export meal scans
           </a>
         </div>

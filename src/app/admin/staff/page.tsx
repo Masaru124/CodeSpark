@@ -1,6 +1,7 @@
 import Flash from "@/components/Flash";
+import ConfirmSubmitButton from "@/components/ConfirmSubmitButton";
 import { q } from "@/lib/db";
-import { addJudge, addVolunteer, setStaffActive } from "../actions";
+import { addJudge, addVolunteer, deleteStaff, setStaffActive } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Judges & volunteers" };
@@ -33,17 +34,12 @@ export default async function StaffPage({
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
         <form action={addJudge} className="card-pad space-y-3">
           <h2 className="text-sm font-bold text-ink-900">Add judge</h2>
+          <p className="text-xs text-ink-500">Name only — the login code is generated for you.</p>
           <div>
             <label htmlFor="judge-name" className="label">
               Name
             </label>
-            <input id="judge-name" name="name" required className="input" placeholder="Dr. Anil Kumar" />
-          </div>
-          <div>
-            <label htmlFor="judge-email" className="label">
-              Email (optional)
-            </label>
-            <input id="judge-email" name="email" type="email" className="input" placeholder="anil@college.edu" />
+            <input id="judge-name" name="name" required minLength={2} maxLength={80} className="input" placeholder="Dr. Anil Kumar" />
           </div>
           <button type="submit" className="btn-primary">
             Add judge
@@ -89,14 +85,25 @@ export default async function StaffPage({
                   </td>
                   <td>{judge.active ? <span className="badge-ok">Active</span> : <span className="badge-neutral">Disabled</span>}</td>
                   <td className="text-right">
-                    <form action={setStaffActive}>
-                      <input type="hidden" name="kind" value="judge" />
-                      <input type="hidden" name="id" value={judge.id} />
-                      <input type="hidden" name="active" value={judge.active ? "false" : "true"} />
-                      <button type="submit" className="btn-ghost text-xs">
-                        {judge.active ? "Disable" : "Enable"}
-                      </button>
-                    </form>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <form action={setStaffActive}>
+                        <input type="hidden" name="kind" value="judge" />
+                        <input type="hidden" name="id" value={judge.id} />
+                        <input type="hidden" name="active" value={judge.active ? "false" : "true"} />
+                        <button type="submit" className="btn-ghost text-xs">
+                          {judge.active ? "Disable" : "Enable"}
+                        </button>
+                      </form>
+                      <form action={deleteStaff}>
+                        <input type="hidden" name="kind" value="judge" />
+                        <input type="hidden" name="id" value={judge.id} />
+                        <ConfirmSubmitButton
+                          label="Delete"
+                          message={`Delete ${judge.name}? This removes their assignments and conflicts. Judges with submitted scores cannot be deleted — disable them instead.`}
+                          className="btn-ghost text-xs text-red-600 hover:text-red-700"
+                        />
+                      </form>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -137,14 +144,25 @@ export default async function StaffPage({
                   </td>
                   <td>{volunteer.active ? <span className="badge-ok">Active</span> : <span className="badge-neutral">Disabled</span>}</td>
                   <td className="text-right">
-                    <form action={setStaffActive}>
-                      <input type="hidden" name="kind" value="volunteer" />
-                      <input type="hidden" name="id" value={volunteer.id} />
-                      <input type="hidden" name="active" value={volunteer.active ? "false" : "true"} />
-                      <button type="submit" className="btn-ghost text-xs">
-                        {volunteer.active ? "Disable" : "Enable"}
-                      </button>
-                    </form>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <form action={setStaffActive}>
+                        <input type="hidden" name="kind" value="volunteer" />
+                        <input type="hidden" name="id" value={volunteer.id} />
+                        <input type="hidden" name="active" value={volunteer.active ? "false" : "true"} />
+                        <button type="submit" className="btn-ghost text-xs">
+                          {volunteer.active ? "Disable" : "Enable"}
+                        </button>
+                      </form>
+                      <form action={deleteStaff}>
+                        <input type="hidden" name="kind" value="volunteer" />
+                        <input type="hidden" name="id" value={volunteer.id} />
+                        <ConfirmSubmitButton
+                          label="Delete"
+                          message={`Delete ${volunteer.name}? Their login stops working immediately. This cannot be undone.`}
+                          className="btn-ghost text-xs text-red-600 hover:text-red-700"
+                        />
+                      </form>
+                    </div>
                   </td>
                 </tr>
               ))}

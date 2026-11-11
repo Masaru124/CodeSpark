@@ -261,7 +261,7 @@ export default function Scanner({
     const interval = window.setInterval(() => {
       void loadRoster();
       void flush();
-    }, 60_000);
+    }, 30_000);
 
     return () => {
       window.removeEventListener("online", goOnline);
