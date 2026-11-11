@@ -1,7 +1,8 @@
 import Link from "next/link";
 import Flash from "@/components/Flash";
+import ConfirmSubmitButton from "@/components/ConfirmSubmitButton";
 import { q } from "@/lib/db";
-import { togglePayment } from "../actions";
+import { createTeam, deleteTeam, togglePayment } from "../actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Teams & passes" };
@@ -66,6 +67,67 @@ export default async function TeamsPage({
         </form>
       </div>
 
+      <details className="card-pad mb-5">
+        <summary className="cursor-pointer text-sm font-bold text-ink-900">
+          Add a team without a CSV
+        </summary>
+        <p className="mt-1 text-xs text-ink-500">
+          Creates the team only. Add its members from the registration CSV import, then print their
+          passes from the team page.
+        </p>
+        <form action={createTeam} className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <label htmlFor="new-name" className="label">
+              Team / project name *
+            </label>
+            <input id="new-name" name="name" required minLength={2} maxLength={120} className="input" />
+          </div>
+          <div>
+            <label htmlFor="new-college" className="label">
+              College
+            </label>
+            <input id="new-college" name="college" maxLength={120} className="input" />
+          </div>
+          <div>
+            <label htmlFor="new-track" className="label">
+              Track
+            </label>
+            <input id="new-track" name="track" maxLength={80} className="input" />
+          </div>
+          <div>
+            <label htmlFor="new-size" className="label">
+              Team size
+            </label>
+            <input
+              id="new-size"
+              name="size"
+              type="number"
+              min={1}
+              max={10}
+              defaultValue={1}
+              className="input"
+            />
+          </div>
+          <div>
+            <label htmlFor="new-payment-ref" className="label">
+              Payment reference
+            </label>
+            <input id="new-payment-ref" name="payment_ref" maxLength={120} className="input" />
+          </div>
+          <div className="flex flex-col justify-end gap-2">
+            <label className="flex items-center gap-2 text-sm text-ink-700">
+              <input type="checkbox" name="payment_verified" value="1" className="h-4 w-4" />
+              Payment already verified
+            </label>
+          </div>
+          <div className="flex items-end justify-end">
+            <button type="submit" className="btn-primary">
+              Add team
+            </button>
+          </div>
+        </form>
+      </details>
+
       {teams.length === 0 ? (
         <div className="card-pad text-sm text-ink-600">
           No teams yet.{" "}
@@ -123,6 +185,14 @@ export default async function TeamsPage({
                       <Link href={`/admin/teams/${team.id}`} className="btn-secondary text-xs">
                         Passes
                       </Link>
+                      <form action={deleteTeam}>
+                        <input type="hidden" name="teamId" value={team.id} />
+                        <ConfirmSubmitButton
+                          label="Delete"
+                          message={`Delete ${team.name}? This also removes its ${team.participants} participant(s), check-ins, meal scans, scores and submission. This cannot be undone.`}
+                          className="btn-ghost text-xs text-red-600 hover:text-red-700"
+                        />
+                      </form>
                     </div>
                   </td>
                 </tr>

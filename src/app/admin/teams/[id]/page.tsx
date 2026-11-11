@@ -2,12 +2,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import Flash from "@/components/Flash";
 import PrintButton from "@/components/PrintButton";
+import ConfirmSubmitButton from "@/components/ConfirmSubmitButton";
 import QrPass from "@/components/QrPass";
 import { one, q } from "@/lib/db";
 import { signQrToken } from "@/lib/crypto";
 import { baseUrl } from "@/lib/site";
 import { fmtDateTime } from "@/lib/format";
-import { togglePayment } from "../../actions";
+import { deleteTeam, togglePayment } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -83,6 +84,14 @@ export default async function TeamPassesPage({
               </button>
             </form>
             <PrintButton />
+            <form action={deleteTeam}>
+              <input type="hidden" name="teamId" value={team.id} />
+              <ConfirmSubmitButton
+                label="Delete team"
+                message={`Delete ${team.name}? This also removes its ${participants.length} participant(s), check-ins, meal scans, scores and submission. This cannot be undone.`}
+                className="btn-ghost text-xs text-red-600 hover:text-red-700"
+              />
+            </form>
           </div>
         </div>
       </div>

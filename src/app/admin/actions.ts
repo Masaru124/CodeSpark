@@ -278,6 +278,80 @@ export async function importCsv(formData: FormData) {
   }
 }
 
+// -------------------------------------------------------------------- teams
+export async function createTeam(formData: FormData) {
+  const session = await requireAdmin();
+  const name = String(formData.get("name") ?? "").trim().slice(0, 120);
+  const college = String(formData.get("college") ?? "").trim().slice(0, 120) || null;
+  const track = String(formData.get("track") ?? "").trim().slice(0, 80) || null;
+  const requestedSize = Number(formData.get("size"));
+  const size = Number.isFinite(requestedSize) ? Math.max(1, Math.min(10, Math.trunc(requestedSize))) : 1;
+  const verified = asBool(formData.get("payment_verified"));
+  const paymentRef = String(formData.get("payment_ref") ?? "").trim().slice(0, 120) || null;
+
+  if (name.length < 2) back("/admin/teams", { error: "Team name is required" });
+
+  // Case-insensitive unique index on teams(name): a duplicate name is a no-op.
+  const team = await one<{ id: string }>(
+    `insert into teams (name, college, track, size, payment_verified, payment_ref)
+     values ($1, $2, $3, $4, $5, $6)
+     on conflict (lower(name)) do nothing
+     returning id`,
+    [name, college, track, size, verified, paymentRef],
+  );
+  if (!team) back("/admin/teams", { error: `A team named ${name} already exists` });
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "team.create",
+    entity: "team",
+    entityId: team.id,
+    payload: { name, college, track, size, verified },
+  });
+  revalidatePath("/admin/teams");
+  revalidatePath("/admin");
+  back(`/admin/teams/${team.id}`, { ok: `${name} created` });
+}
+
+export async function deleteTeam(formData: FormData) {
+  const session = await requireAdmin();
+  const teamId = String(formData.get("teamId") ?? "");
+  if (!teamId) back("/admin/teams", { error: "Missing team" });
+
+  // Read the name and impact first: cascades remove participants, scans,
+  // assignments, scores, submissions, results and repo rows with the team.
+  const team = await one<{ id: string; name: string; participants: number; scans: number }>(
+    `select t.id, t.name,
+            (select count(*) from participants p where p.team_id = t.id)::int as participants,
+            (select count(*) from meal_scans m where m.team_id = t.id)::int as scans
+       from teams t where t.id = $1`,
+    [teamId],
+  );
+  if (!team) back("/admin/teams", { error: "Team not found" });
+
+  await q(`delete from teams where id = $1`, [teamId]);
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "team.delete",
+    entity: "team",
+    entityId: team.id,
+    payload: { name: team.name, participants: team.participants, scans: team.scans },
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/teams");
+  revalidatePath("/admin/judging");
+  revalidatePath("/admin/results");
+  revalidatePath("/admin/repos");
+  back("/admin/teams", {
+    ok: `${team.name} deleted with ${team.participants} participant${
+      team.participants === 1 ? "" : "s"
+    }`,
+  });
+}
+
 // ----------------------------------------------------------------- payments
 export async function togglePayment(formData: FormData) {
   const session = await requireAdmin();
