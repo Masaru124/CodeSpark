@@ -3,6 +3,7 @@ import { one, q } from "@/lib/db";
 import { verifyQrToken } from "@/lib/crypto";
 import { getConfig } from "@/lib/config";
 import { fmtDateTime, fmtScore, fmtTime } from "@/lib/format";
+import { baseUrl } from "@/lib/site";
 import QrPass from "@/components/QrPass";
 import Flash from "@/components/Flash";
 import { submitProject } from "../actions";
@@ -67,6 +68,11 @@ export default async function PassPage({
       </main>
     );
   }
+
+  // The QR carries the absolute pass link, not the raw token, so any phone
+  // camera (or printed sheet) opens the pass instead of showing a hex string.
+  const origin = await baseUrl();
+  const passUrl = `${origin}/pass/${token}`;
 
   const config = await getConfig();
   const deadline = new Date(config.event.submission_deadline);
@@ -143,7 +149,7 @@ export default async function PassPage({
               </div>
             </div>
             <div className="text-center">
-              <QrPass value={token} size={150} className="rounded-xl ring-1 ring-ink-200" />
+              <QrPass value={passUrl} size={150} className="rounded-xl ring-1 ring-ink-200" />
               <p className="mt-1.5 font-mono text-[10px] text-ink-400">Show this at the desk</p>
             </div>
           </div>

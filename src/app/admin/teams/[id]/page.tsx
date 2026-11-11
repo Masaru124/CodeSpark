@@ -117,7 +117,7 @@ export default async function TeamPassesPage({
                     </div>
                   </dl>
                 </div>
-                <QrPass value={participant.token} size={132} className="shrink-0 rounded-lg ring-1 ring-ink-200" />
+                <QrPass value={passUrl} size={150} className="shrink-0 rounded-lg ring-1 ring-ink-200" />
               </div>
               <input
                 readOnly

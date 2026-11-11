@@ -32,6 +32,19 @@ const MODES: Array<{ id: Mode; label: string }> = [
 
 const ROSTER_KEY = "codespark-roster-v1";
 
+/**
+ * Pass QR codes carry the full link (https://host/pass/<token>) so a normal
+ * phone camera can open them. Older printed passes and hand-typed entries may
+ * still be a bare token, so accept both and ignore any query string.
+ */
+function extractPassToken(raw: string): string {
+  const value = raw.trim();
+  if (!value) return "";
+  const fromLink = value.match(/\/pass\/([^/?#\s]+)/i);
+  if (fromLink) return fromLink[1];
+  return value.split(/[/?#\s]/).filter(Boolean).pop() ?? "";
+}
+
 export default function Scanner({
   volunteer,
   eventName,
@@ -152,7 +165,7 @@ export default function Scanner({
 
   const record = useCallback(
     async (rawToken: string) => {
-      const token = rawToken.trim().replace(/^.*\//, "");
+      const token = extractPassToken(rawToken);
       if (!token || busyRef.current) return;
 
       const now = Date.now();
