@@ -127,8 +127,11 @@ async function migrate() {
 }
 
 async function seed() {
-  const email = (process.env.ADMIN_EMAIL || "techlead@codespark.local").toLowerCase();
-  const password = process.env.ADMIN_PASSWORD || "codespark-admin";
+  const email = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+  const password = process.env.ADMIN_PASSWORD || "";
+  if (!email) {
+    throw new Error("ADMIN_EMAIL is required");
+  }
   if (password.length < 10) {
     throw new Error("ADMIN_PASSWORD must be at least 10 characters");
   }

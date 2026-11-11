@@ -87,7 +87,7 @@ export default function LoginForm({ next }: { next?: string }) {
               className="input"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="techlead@codespark.local"
+              placeholder="admin@example.com"
             />
           </div>
           <div>

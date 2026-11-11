@@ -8,7 +8,14 @@ import { one, q } from "@/lib/db";
 import { signTeamToken } from "@/lib/crypto";
 import { baseUrl } from "@/lib/site";
 import { fmtDateTime } from "@/lib/format";
-import { deleteTeam, togglePayment } from "../../actions";
+import {
+  addParticipant,
+  deleteParticipant,
+  deleteTeam,
+  togglePayment,
+  updateParticipant,
+  updateTeam,
+} from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +45,13 @@ export default async function TeamPassPage({
     track: string | null;
     payment_verified: boolean;
     payment_ref: string | null;
-  }>(`select id, name, college, track, payment_verified, payment_ref from teams where id = $1`, [id]);
+    size: number;
+    notes: string | null;
+  }>(
+    `select id, name, college, track, payment_verified, payment_ref, size, notes
+       from teams where id = $1`,
+    [id],
+  );
 
   if (!team) notFound();
 
@@ -95,6 +108,97 @@ export default async function TeamPassPage({
           </div>
         </div>
       </div>
+
+      <details className="card-pad no-print">
+        <summary className="cursor-pointer text-sm font-bold text-ink-900">
+          Edit team details
+        </summary>
+        <form action={updateTeam} className="mt-4 grid gap-3 sm:grid-cols-2">
+          <input type="hidden" name="teamId" value={team.id} />
+          <div>
+            <label htmlFor="team-name" className="label">
+              Team / project name *
+            </label>
+            <input
+              id="team-name"
+              name="name"
+              required
+              minLength={2}
+              maxLength={120}
+              defaultValue={team.name}
+              className="input"
+            />
+          </div>
+          <div>
+            <label htmlFor="team-college" className="label">
+              College
+            </label>
+            <input
+              id="team-college"
+              name="college"
+              maxLength={120}
+              defaultValue={team.college ?? ""}
+              className="input"
+            />
+          </div>
+          <div>
+            <label htmlFor="team-track" className="label">
+              Track
+            </label>
+            <input
+              id="team-track"
+              name="track"
+              maxLength={80}
+              defaultValue={team.track ?? ""}
+              className="input"
+            />
+          </div>
+          <div>
+            <label htmlFor="team-size" className="label">
+              Declared team size
+            </label>
+            <input
+              id="team-size"
+              name="size"
+              type="number"
+              min={1}
+              max={10}
+              defaultValue={team.size}
+              className="input"
+            />
+          </div>
+          <div>
+            <label htmlFor="team-ref" className="label">
+              Payment reference
+            </label>
+            <input
+              id="team-ref"
+              name="payment_ref"
+              maxLength={120}
+              defaultValue={team.payment_ref ?? ""}
+              className="input"
+            />
+          </div>
+          <div className="sm:col-span-2">
+            <label htmlFor="team-notes" className="label">
+              Internal notes
+            </label>
+            <textarea
+              id="team-notes"
+              name="notes"
+              rows={2}
+              maxLength={2000}
+              defaultValue={team.notes ?? ""}
+              className="input"
+            />
+          </div>
+          <div className="sm:col-span-2">
+            <button type="submit" className="btn-primary">
+              Save team details
+            </button>
+          </div>
+        </form>
+      </details>
 
       <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
         <article className="card-pad print-item break-inside-avoid">
@@ -162,6 +266,79 @@ export default async function TeamPassPage({
                     {participant.phone ?? ""}
                   </p>
                 ) : null}
+                <details className="mt-2 no-print">
+                  <summary className="cursor-pointer text-xs font-semibold text-spark-700">
+                    Edit member
+                  </summary>
+                  <form action={updateParticipant} className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <input type="hidden" name="teamId" value={team.id} />
+                    <input type="hidden" name="participantId" value={participant.id} />
+                    <div>
+                      <label htmlFor={`name-${participant.id}`} className="label">
+                        Name *
+                      </label>
+                      <input
+                        id={`name-${participant.id}`}
+                        name="name"
+                        required
+                        maxLength={120}
+                        defaultValue={participant.name}
+                        className="input"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`email-${participant.id}`} className="label">
+                        Email
+                      </label>
+                      <input
+                        id={`email-${participant.id}`}
+                        name="email"
+                        type="email"
+                        maxLength={160}
+                        defaultValue={participant.email ?? ""}
+                        className="input"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`phone-${participant.id}`} className="label">
+                        Phone
+                      </label>
+                      <input
+                        id={`phone-${participant.id}`}
+                        name="phone"
+                        maxLength={30}
+                        defaultValue={participant.phone ?? ""}
+                        className="input"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 self-end text-xs text-ink-600">
+                      <input
+                        type="checkbox"
+                        name="is_leader"
+                        value="true"
+                        defaultChecked={participant.is_leader}
+                        className="h-4 w-4"
+                      />
+                      Team lead
+                    </label>
+                    <div className="sm:col-span-2">
+                      <button type="submit" className="btn-primary text-xs">
+                        Save member
+                      </button>
+                    </div>
+                  </form>
+                  <form action={deleteParticipant} className="mt-2">
+                    <input type="hidden" name="teamId" value={team.id} />
+                    <input type="hidden" name="participantId" value={participant.id} />
+                    <ConfirmSubmitButton
+                      label="Remove member"
+                      message={`Remove ${participant.name} from ${team.name}?${
+                        participant.is_leader ? " Another member will be promoted to team lead." : ""
+                      }`}
+                      className="btn-ghost text-xs text-red-600 hover:text-red-700"
+                    />
+                  </form>
+                </details>
               </li>
             ))}
             {participants.length === 0 ? (
@@ -170,6 +347,59 @@ export default async function TeamPassPage({
               </li>
             ) : null}
           </ul>
+          <details className="mt-4 no-print">
+            <summary className="cursor-pointer text-xs font-semibold text-spark-700">
+              Add a member
+            </summary>
+            <form action={addParticipant} className="mt-3 grid gap-2 sm:grid-cols-2">
+              <input type="hidden" name="teamId" value={team.id} />
+              <div>
+                <label htmlFor="new-member-name" className="label">
+                  Name *
+                </label>
+                <input
+                  id="new-member-name"
+                  name="name"
+                  required
+                  maxLength={120}
+                  className="input"
+                />
+              </div>
+              <div>
+                <label htmlFor="new-member-email" className="label">
+                  Email
+                </label>
+                <input
+                  id="new-member-email"
+                  name="email"
+                  type="email"
+                  maxLength={160}
+                  className="input"
+                />
+              </div>
+              <div>
+                <label htmlFor="new-member-phone" className="label">
+                  Phone
+                </label>
+                <input
+                  id="new-member-phone"
+                  name="phone"
+                  maxLength={30}
+                  className="input"
+                />
+              </div>
+              <label className="flex items-center gap-2 self-end text-xs text-ink-600">
+                <input type="checkbox" name="is_leader" value="true" className="h-4 w-4" />
+                Make team lead
+              </label>
+              <div className="sm:col-span-2">
+                <button type="submit" className="btn-primary text-xs">
+                  Add member
+                </button>
+              </div>
+            </form>
+          </details>
+
           <p className="mt-3 text-xs text-ink-500">
             Check-in times:{" "}
             {participants.some((participant) => participant.checked_in_at)

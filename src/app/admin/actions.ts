@@ -532,6 +532,197 @@ export async function verifyAllTeams() {
   });
 }
 
+function isUniqueViolation(error: unknown) {
+  return (error as { code?: string } | null)?.code === "23505";
+}
+
+export async function updateTeam(formData: FormData) {
+  const session = await requireAdmin();
+  const teamId = String(formData.get("teamId") ?? "");
+  const name = String(formData.get("name") ?? "").trim().slice(0, 120);
+  const collegeRaw = canonicalCollege(String(formData.get("college") ?? "").slice(0, 120));
+  const college = collegeRaw || null;
+  const track = String(formData.get("track") ?? "").trim().slice(0, 80) || null;
+  const sizeRaw = Number(formData.get("size"));
+  const size = Number.isFinite(sizeRaw) ? Math.max(1, Math.min(10, Math.trunc(sizeRaw))) : 1;
+  const paymentRef = String(formData.get("payment_ref") ?? "").trim().slice(0, 120) || null;
+  const notes = String(formData.get("notes") ?? "").trim().slice(0, 2000) || null;
+
+  if (!teamId) back("/admin/teams", { error: "Missing team" });
+  const path = `/admin/teams/${teamId}`;
+  if (name.length < 2) back(path, { error: "Team name is required" });
+
+  try {
+    const updated = await one<{ id: string }>(
+      `update teams
+          set name = $2, college = $3, track = $4, size = $5,
+              payment_ref = $6, notes = $7, updated_at = now()
+        where id = $1
+        returning id`,
+      [teamId, name, college, track, size, paymentRef, notes],
+    );
+    if (!updated) back("/admin/teams", { error: "Team not found" });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      back(path, { error: `A team named ${name} already exists for ${college ?? "this college"}` });
+    }
+    throw error;
+  }
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "team.update",
+    entity: "team",
+    entityId: teamId,
+    payload: { name, college, track, size },
+  });
+  revalidatePath("/admin/teams");
+  revalidatePath(path);
+  revalidatePath("/admin");
+  back(path, { ok: "Team details saved" });
+}
+
+export async function addParticipant(formData: FormData) {
+  const session = await requireAdmin();
+  const teamId = String(formData.get("teamId") ?? "");
+  const name = String(formData.get("name") ?? "").trim().slice(0, 120);
+  const email = String(formData.get("email") ?? "").trim().toLowerCase().slice(0, 160) || null;
+  const phone = String(formData.get("phone") ?? "").trim().slice(0, 30) || null;
+  const leader = asBool(formData.get("is_leader"));
+  const path = `/admin/teams/${teamId}`;
+
+  if (!teamId) back("/admin/teams", { error: "Missing team" });
+  if (name.length < 1) back(path, { error: "Member name is required" });
+
+  try {
+    if (leader) await q(`update participants set is_leader = false where team_id = $1`, [teamId]);
+    await q(
+      `insert into participants (team_id, name, email, phone, is_leader) values ($1, $2, $3, $4, $5)`,
+      [teamId, name, email, phone, leader],
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      back(path, { error: "That email or phone number is already registered to another participant" });
+    }
+    throw error;
+  }
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "participant.add",
+    entity: "team",
+    entityId: teamId,
+    payload: { name, email, phone, leader },
+  });
+  revalidatePath(path);
+  revalidatePath("/admin/teams");
+  back(path, { ok: `${name} added${leader ? " as team lead" : ""}` });
+}
+
+export async function updateParticipant(formData: FormData) {
+  const session = await requireAdmin();
+  const teamId = String(formData.get("teamId") ?? "");
+  const participantId = String(formData.get("participantId") ?? "");
+  const name = String(formData.get("name") ?? "").trim().slice(0, 120);
+  const email = String(formData.get("email") ?? "").trim().toLowerCase().slice(0, 160) || null;
+  const phone = String(formData.get("phone") ?? "").trim().slice(0, 30) || null;
+  const leader = asBool(formData.get("is_leader"));
+  const path = `/admin/teams/${teamId}`;
+
+  if (!teamId || !participantId) back("/admin/teams", { error: "Missing member" });
+  if (name.length < 1) back(path, { error: "Member name is required" });
+
+  const current = await one<{ is_leader: boolean }>(
+    `select is_leader from participants where id = $1 and team_id = $2`,
+    [participantId, teamId],
+  );
+  if (!current) back(path, { error: "Member not found on this team" });
+
+  // A team must keep exactly one lead; unchecking the last one is blocked.
+  if (!leader && current.is_leader) {
+    const others = await one<{ n: number }>(
+      `select count(*)::int as n from participants
+        where team_id = $1 and is_leader and id <> $2`,
+      [teamId, participantId],
+    );
+    if (!others || others.n === 0) {
+      back(path, { error: "A team needs one lead — make another member lead first" });
+    }
+  }
+
+  try {
+    if (leader) {
+      await q(`update participants set is_leader = false where team_id = $1 and id <> $2`, [
+        teamId,
+        participantId,
+      ]);
+    }
+    const updated = await one<{ id: string }>(
+      `update participants set name = $3, email = $4, phone = $5, is_leader = $6
+        where id = $1 and team_id = $2 returning id`,
+      [participantId, teamId, name, email, phone, leader],
+    );
+    if (!updated) back(path, { error: "Member not found on this team" });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      back(path, { error: "That email or phone number is already registered to another participant" });
+    }
+    throw error;
+  }
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "participant.update",
+    entity: "team",
+    entityId: teamId,
+    payload: { participantId, name, leader },
+  });
+  revalidatePath(path);
+  revalidatePath("/admin/teams");
+  back(path, { ok: `${name} updated` });
+}
+
+export async function deleteParticipant(formData: FormData) {
+  const session = await requireAdmin();
+  const teamId = String(formData.get("teamId") ?? "");
+  const participantId = String(formData.get("participantId") ?? "");
+  const path = `/admin/teams/${teamId}`;
+
+  if (!teamId || !participantId) back("/admin/teams", { error: "Missing member" });
+
+  const member = await one<{ name: string; is_leader: boolean }>(
+    `select name, is_leader from participants where id = $1 and team_id = $2`,
+    [participantId, teamId],
+  );
+  if (!member) back(path, { error: "Member not found on this team" });
+
+  await q(`delete from participants where id = $1 and team_id = $2`, [participantId, teamId]);
+
+  // Keep the team checkable: promote the earliest remaining member.
+  if (member.is_leader) {
+    await q(
+      `update participants set is_leader = true
+        where id = (select id from participants where team_id = $1 order by created_at limit 1)`,
+      [teamId],
+    );
+  }
+
+  await recordAudit({
+    actor: session.label,
+    role: "admin",
+    action: "participant.delete",
+    entity: "team",
+    entityId: teamId,
+    payload: { participantId, name: member.name, wasLeader: member.is_leader },
+  });
+  revalidatePath(path);
+  revalidatePath("/admin/teams");
+  back(path, { ok: `${member.name} removed` });
+}
+
 export async function togglePayment(formData: FormData) {
   const session = await requireAdmin();
   const teamId = String(formData.get("teamId") ?? "");
